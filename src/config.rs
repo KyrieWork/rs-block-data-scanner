@@ -55,6 +55,8 @@ pub struct ScannerConfig {
     pub concurrency: usize,
     #[serde(default = "ScannerConfig::default_start_block")]
     pub start_block: u64,
+    #[serde(default = "ScannerConfig::default_confirm_blocks")]
+    pub confirm_blocks: u64,
     #[serde(default = "ScannerConfig::default_realtime")]
     pub realtime: bool,
 }
@@ -65,6 +67,9 @@ impl ScannerConfig {
     }
     fn default_start_block() -> u64 {
         0
+    }
+    fn default_confirm_blocks() -> u64 {
+        10
     }
     fn default_realtime() -> bool {
         true

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use rocksdb::{DB, Direction, IteratorMode, WriteBatch};
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::core::storage::KVStorage;
+use crate::storage::traits::KVStorage;
 
 pub struct RocksDBStorage {
     db: Arc<DB>,

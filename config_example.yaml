@@ -11,6 +11,9 @@ scanner:
   # Scan start block number (0 = latest block)
   start_block: 0
 
+  # Confirm blocks (e.g. EVM finality 12 blocks)
+  confirm_blocks: 5
+
   # Concurrency (concurrent RPC requests)
   concurrency: 4
 
@@ -41,12 +44,6 @@ storage:
 
   # Whether to enable compression
   compression: true
-
-  # ColumnFamily configuration (optional)
-  column_families:
-    - "blocks"
-    - "receipts"
-    - "logs"
 
 # ============================
 # Logging and monitoring configuration

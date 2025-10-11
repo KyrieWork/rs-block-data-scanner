@@ -1,13 +1,14 @@
-mod cli;
-mod config;
-mod utils;
-
 use anyhow::Result;
 use clap::Parser;
-use cli::Cli;
-use config::AppConfig;
+use rs_block_data_scanner::{
+    chains::evm::scanner::EvmScanner,
+    cli::Cli,
+    config::AppConfig,
+    core::scanner::Scanner,
+    storage::{rocksdb::RocksDBStorage, traits::KVStorage},
+    utils::logger::init_logger,
+};
 use tracing::{info, warn};
-use utils::logger::init_logger;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,9 +32,29 @@ async fn main() -> Result<()> {
     match cfg.scanner.chain_type.as_str() {
         "evm" => {
             info!("🚀 Start EVM blockchain data scanning service...");
+
+            // Initialize storage
+            let storage = RocksDBStorage::new(&cfg.storage.path)?;
+            storage.init()?;
+            info!("✅ Storage initialized at: {}", cfg.storage.path);
+
+            // Create EVM scanner
+            let scanner = EvmScanner::new(cfg.scanner.clone(), cfg.rpc.url.clone(), storage);
+
+            // Initialize scanner (creates initial progress if not exists)
+            scanner.init().await?;
+            info!(
+                "✅ Scanner initialized - Chain: {}, Start block: {}",
+                cfg.scanner.chain_name, cfg.scanner.start_block
+            );
+
+            // Start scanning loop
+            info!("🔄 Starting block scanner...");
+            scanner.run().await?;
         }
         "solana" => {
             info!("🚀 Start Solana blockchain data scanning service...");
+            warn!("⚠️ Not supported yet");
         }
         other => {
             warn!("⚠️ Unknown chain type: {}", other);
