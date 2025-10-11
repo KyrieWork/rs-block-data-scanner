@@ -119,7 +119,7 @@ impl Scanner for EvmScanner {
             .ok_or_else(|| anyhow::anyhow!("Block {} not found", block_number))?;
 
         // verify block and receipts is match
-        if receipts.len() > 0 && receipts[0].block_hash != Some(block.header.hash) {
+        if !receipts.is_empty() && receipts[0].block_hash != Some(block.header.hash) {
             return Err(anyhow::anyhow!("Block and receipts is not match"));
         }
 

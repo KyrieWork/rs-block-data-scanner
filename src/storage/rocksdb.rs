@@ -112,10 +112,10 @@ impl KVStorage for RocksDBStorage {
 
             results.push((key_str, value_str));
 
-            if let Some(limit) = limit {
-                if results.len() >= limit {
-                    break;
-                }
+            if let Some(limit) = limit
+                && results.len() >= limit
+            {
+                break;
             }
         }
 
@@ -231,7 +231,7 @@ mod tests {
         let data = TestData {
             id: 42,
             name: "test_name".to_string(),
-            value: 3.14,
+            value: 42.5,
         };
 
         storage
