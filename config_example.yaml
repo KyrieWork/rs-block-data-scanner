@@ -1,0 +1,61 @@
+# ============================
+# Global scanning service configuration
+# ============================
+scanner:
+  # Current scanning chain type: evm | solana
+  chain_type: "evm"
+
+  # Chain name
+  chain_name: "Ethereum"
+
+  # Scan start block number (0 = latest block)
+  start_block: 0
+
+  # Concurrency (concurrent RPC requests)
+  concurrency: 4
+
+  # Whether to enable real-time tracking mode (when the latest block is reached, continue to listen)
+  realtime: true
+
+# ============================
+# RPC node configuration
+# ============================
+rpc:
+  # Main node RPC address
+  url: "https://mainnet.infura.io/v3/YOUR_API_KEY"
+
+  # Node request timeout (seconds)
+  timeout_secs: 15
+
+  # Node backup list (optional)
+  backups:
+    - "https://eth.llamarpc.com"
+    - "https://rpc.flashbots.net"
+
+# ============================
+# Storage layer configuration
+# ============================
+storage:
+  # RocksDB storage path
+  path: "./data/rocksdb"
+
+  # Whether to enable compression
+  compression: true
+
+  # ColumnFamily configuration (optional)
+  column_families:
+    - "blocks"
+    - "receipts"
+    - "logs"
+
+# ============================
+# Logging and monitoring configuration
+# ============================
+logging:
+  level: "info" # Optional: trace, debug, info, warn, error
+  to_file: true # Whether to output to file
+  file_path: "./logs/scanner.log"
+
+metrics:
+  enable: true
+  prometheus_exporter_port: 9100

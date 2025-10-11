@@ -19,9 +19,5 @@ pub trait KVStorage: Send + Sync {
     fn batch_write_json<T: Serialize>(&self, pairs: Vec<(String, T)>) -> Result<()>;
 
     // Range query
-    fn scan_prefix(
-        &self,
-        prefix: &str,
-        limit: Option<usize>,
-    ) -> Result<Vec<(String, String)>>;
+    fn scan_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<(String, String)>>;
 }
