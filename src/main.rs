@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
             info!("✅ Storage initialized at: {}", cfg.storage.path);
 
             // Create EVM scanner
-            let scanner = EvmScanner::new(cfg.scanner.clone(), cfg.rpc.url.clone(), storage);
+            let scanner = EvmScanner::new(cfg.scanner.clone(), cfg.rpc.url.clone(), storage)?;
 
             // Initialize scanner (creates initial progress if not exists)
             scanner.init().await?;

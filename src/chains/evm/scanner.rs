@@ -4,7 +4,8 @@ use crate::core::types::ScannerProgress;
 use crate::storage::rocksdb::RocksDBStorage;
 use crate::storage::schema::keys;
 use crate::{config::ScannerConfig, storage::traits::KVStorage};
-use alloy::providers::{Provider, ProviderBuilder};
+use alloy::providers::{Provider, ProviderBuilder, RootProvider};
+use alloy::transports::http::{Client, Http};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -14,15 +15,22 @@ pub struct EvmScanner {
     pub scanner_cfg: ScannerConfig,
     pub rpc_url: String,
     pub storage: RocksDBStorage,
+    provider: RootProvider<Http<Client>>,
 }
 
 impl EvmScanner {
-    pub fn new(scanner_cfg: ScannerConfig, rpc_url: String, storage: RocksDBStorage) -> Self {
-        Self {
+    pub fn new(
+        scanner_cfg: ScannerConfig,
+        rpc_url: String,
+        storage: RocksDBStorage,
+    ) -> Result<Self> {
+        let provider = ProviderBuilder::new().on_http(rpc_url.parse()?);
+        Ok(Self {
             scanner_cfg,
             rpc_url,
             storage,
-        }
+            provider,
+        })
     }
 
     fn create_initial_progress(&self) -> ScannerProgress {
@@ -73,8 +81,7 @@ impl EvmScanner {
     async fn get_target_block(&self) -> Result<(u64, u64)> {
         let progress = self.get_progress()?;
 
-        let provider = ProviderBuilder::new().on_http(self.rpc_url.parse()?);
-        let latest_block = provider.get_block_number().await?;
+        let latest_block = self.provider.get_block_number().await?;
 
         // Calculate safe target block: latest_block - confirm_blocks
         // This ensures we don't scan blocks that might be reorganized
@@ -99,14 +106,14 @@ impl Scanner for EvmScanner {
     }
 
     async fn fetch_block(&self, block_number: u64) -> Result<BlockData> {
-        let provider = ProviderBuilder::new().on_http(self.rpc_url.parse()?);
-
-        let block = provider
+        let block = self
+            .provider
             .get_block_by_number(block_number.into(), true)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block {} not found", block_number))?;
 
-        let receipts = provider
+        let receipts = self
+            .provider
             .get_block_receipts(block_number.into())
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block {} not found", block_number))?;
@@ -204,6 +211,7 @@ mod tests {
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
         )
+        .unwrap()
     }
 
     #[tokio::test]
