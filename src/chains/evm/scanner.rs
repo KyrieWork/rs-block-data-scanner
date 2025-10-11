@@ -1,11 +1,15 @@
-use crate::core::scanner::Scanner;
-use crate::core::types::BlockData;
-use crate::core::types::ScannerProgress;
-use crate::storage::rocksdb::RocksDBStorage;
-use crate::storage::schema::keys;
-use crate::{config::ScannerConfig, storage::traits::KVStorage};
-use alloy::providers::{Provider, ProviderBuilder, RootProvider};
-use alloy::transports::http::{Client, Http};
+use crate::{
+    config::ScannerConfig,
+    core::{
+        scanner::Scanner,
+        types::{BlockData, ScannerProgress},
+    },
+    storage::{rocksdb::RocksDBStorage, schema::keys, traits::KVStorage},
+};
+use alloy::{
+    providers::{Provider, ProviderBuilder, RootProvider},
+    transports::http::{Client, Http},
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -99,8 +103,25 @@ impl Scanner for EvmScanner {
     async fn init(&self) -> Result<()> {
         let key = keys::progress_key(&self.scanner_cfg.chain_name);
         if self.storage.read_json::<ScannerProgress>(&key)?.is_none() {
-            self.storage
-                .write_json(&key, &self.create_initial_progress())?;
+            let initial_block = if self.scanner_cfg.start_block == 0 {
+                let last_block = self.provider.get_block_number().await?;
+                if self.scanner_cfg.confirm_blocks <= last_block {
+                    last_block - self.scanner_cfg.confirm_blocks
+                } else {
+                    last_block
+                }
+            } else {
+                self.scanner_cfg.start_block
+            };
+            let mut progress = self.create_initial_progress();
+            progress.current_block = initial_block;
+            progress.target_block = initial_block;
+
+            info!(
+                "✅ Initial progress created: current_block={}",
+                progress.current_block
+            );
+            self.storage.write_json(&key, &progress)?;
         }
         Ok(())
     }

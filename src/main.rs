@@ -25,6 +25,7 @@ async fn main() -> Result<()> {
 
     info!("✅ Configuration load successful");
     info!(chain = %cfg.scanner.chain_type, "Chain type configuration");
+    info!(chain_name = %cfg.scanner.chain_name, "Chain name");
     info!(start_block = cfg.scanner.start_block, "Start block number");
     info!(rpc_url = %cfg.rpc.url, "RPC node");
 
@@ -43,10 +44,6 @@ async fn main() -> Result<()> {
 
             // Initialize scanner (creates initial progress if not exists)
             scanner.init().await?;
-            info!(
-                "✅ Scanner initialized - Chain: {}, Start block: {}",
-                cfg.scanner.chain_name, cfg.scanner.start_block
-            );
 
             // Start scanning loop
             info!("🔄 Starting block scanner...");
