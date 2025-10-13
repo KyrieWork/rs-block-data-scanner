@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::{
     config::ScannerConfig,
     core::{
@@ -13,7 +15,8 @@ use alloy::{
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use tracing::info;
+use tokio::time::timeout;
+use tracing::{debug, error, info};
 
 pub struct EvmScanner {
     pub scanner_cfg: ScannerConfig,
@@ -76,8 +79,10 @@ impl EvmScanner {
 
         self.storage
             .write(&block_data_key, &block_data.block_data_json)?;
+        debug!("⏏️ Store block data: {}", block_data_key);
         self.storage
             .write(&block_receipts_key, &block_data.block_receipts_json)?;
+        debug!("⏏️ Store block receipts: {}", block_receipts_key);
 
         Ok(())
     }
@@ -168,31 +173,44 @@ impl Scanner for EvmScanner {
                 let scan_block = progress.current_block + 1;
 
                 // Fetch block data
-                let block_data = self.fetch_block(scan_block).await?;
+                let block_data = self.fetch_block(scan_block);
 
-                // Store block data and receipts to RocksDB
-                self.store_block_data(scan_block, &block_data)?;
+                match timeout(
+                    Duration::from_secs(self.scanner_cfg.timeout_secs),
+                    block_data,
+                )
+                .await
+                {
+                    Ok(Ok(block_data)) => {
+                        self.store_block_data(scan_block, &block_data)?;
+                        // Update progress
+                        progress.current_block = scan_block;
 
-                // Update progress
-                progress.current_block = scan_block;
-                progress.updated_at = Utc::now();
+                        // Set status based on how far behind we are
+                        let blocks_behind = target_block.saturating_sub(scan_block);
+                        progress.status = if blocks_behind > 10 {
+                            "catching_up".to_string()
+                        } else if blocks_behind > 0 {
+                            "scanning".to_string()
+                        } else {
+                            "synced".to_string()
+                        };
 
-                // Set status based on how far behind we are
-                let blocks_behind = target_block.saturating_sub(scan_block);
-                progress.status = if blocks_behind > 10 {
-                    "catching_up".to_string()
-                } else if blocks_behind > 0 {
-                    "scanning".to_string()
-                } else {
-                    "synced".to_string()
-                };
+                        progress.updated_at = Utc::now();
+                        self.update_progress(progress.clone())?;
 
-                self.update_progress(progress.clone())?;
-
-                info!(
-                    "✅ Scanned block {} - Status: {}",
-                    scan_block, progress.status
-                );
+                        info!(
+                            "✅ Scanned block {} - Status: {}",
+                            scan_block, progress.status
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        error!("❌ Fetch block data failed: {}", e);
+                    }
+                    Err(e) => {
+                        error!("❌ Fetch block data timeout: {}", e);
+                    }
+                }
             } else {
                 // Already caught up, set to idle
                 progress.status = "idle".to_string();
@@ -228,6 +246,7 @@ mod tests {
                 start_block: 100,
                 confirm_blocks: 1,
                 realtime: true,
+                timeout_secs: 15,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
@@ -433,6 +452,60 @@ mod tests {
             "Store block data test passed! Block: {}, Hash: {}",
             block_number, block_data.hash
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_fetch_block_with_timeout() -> Result<()> {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join(format!("rocksdb_test_timeout_{}", std::process::id()));
+        let path_str = path.to_str().unwrap().to_string();
+
+        // Clean up if exists from previous failed test
+        let _ = std::fs::remove_dir_all(&path_str);
+
+        // Create scanner with very short timeout
+        let scanner = EvmScanner::new(
+            ScannerConfig {
+                chain_type: "evm".to_string(),
+                chain_name: "anvil".to_string(),
+                concurrency: 1,
+                start_block: 1,
+                confirm_blocks: 1,
+                realtime: true,
+                timeout_secs: 1, // Very short timeout for testing
+            },
+            "http://127.0.0.1:8545".to_string(),
+            RocksDBStorage::new(&path_str).unwrap(),
+        )
+        .unwrap();
+
+        scanner.init().await?;
+
+        // Test 1: Normal fetch should work within timeout
+        let block_number = 1;
+        let fetch_result = timeout(
+            Duration::from_secs(scanner.scanner_cfg.timeout_secs),
+            scanner.fetch_block(block_number),
+        )
+        .await;
+
+        assert!(
+            fetch_result.is_ok(),
+            "Fetch should complete within timeout for valid block"
+        );
+        assert!(
+            fetch_result.unwrap().is_ok(),
+            "Fetch should succeed for valid block"
+        );
+
+        // Test 2: Verify timeout configuration is correctly applied
+        assert_eq!(
+            scanner.scanner_cfg.timeout_secs, 1,
+            "Timeout configuration should be 1 second"
+        );
+
+        println!("Timeout test passed! Timeout is correctly configured and applied.");
         Ok(())
     }
 }

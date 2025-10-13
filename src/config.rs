@@ -18,16 +18,9 @@ pub struct AppConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct RpcConfig {
     pub url: String,
-    #[serde(default = "RpcConfig::default_timeout_secs")]
-    pub timeout_secs: u64,
+
     #[serde(default)]
     pub backups: Option<Vec<String>>,
-}
-
-impl RpcConfig {
-    fn default_timeout_secs() -> u64 {
-        15
-    }
 }
 
 /// RocksDB storage config
@@ -59,6 +52,8 @@ pub struct ScannerConfig {
     pub confirm_blocks: u64,
     #[serde(default = "ScannerConfig::default_realtime")]
     pub realtime: bool,
+    #[serde(default = "ScannerConfig::default_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 impl ScannerConfig {
@@ -73,6 +68,9 @@ impl ScannerConfig {
     }
     fn default_realtime() -> bool {
         true
+    }
+    fn default_timeout_secs() -> u64 {
+        15
     }
 }
 

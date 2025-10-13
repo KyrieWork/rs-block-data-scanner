@@ -20,15 +20,15 @@ scanner:
   # Whether to enable real-time tracking mode (when the latest block is reached, continue to listen)
   realtime: true
 
+  # Node request timeout (seconds)
+  timeout_secs: 15
+
 # ============================
 # RPC node configuration
 # ============================
 rpc:
   # Main node RPC address
   url: "https://mainnet.infura.io/v3/YOUR_API_KEY"
-
-  # Node request timeout (seconds)
-  timeout_secs: 15
 
   # Node backup list (optional)
   backups:
