@@ -6,7 +6,7 @@ scanner:
   chain_type: "evm"
 
   # Chain name
-  chain_name: "Ethereum"
+  chain_name: "ethereum"
 
   # Scan start block number (0 = latest block)
   start_block: 0
@@ -39,7 +39,12 @@ rpc:
 # Storage layer configuration
 # ============================
 storage:
-  # RocksDB storage path
+  # RocksDB storage base path
+  # Actual path will be: {path}/{chain_name}
+  # Examples:
+  #   - Ethereum: ./data/rocksdb/Ethereum
+  #   - BSC: ./data/rocksdb/BSC
+  # This allows multiple chains to run concurrently without conflicts
   path: "./data/rocksdb"
 
   # Whether to enable compression
@@ -51,7 +56,7 @@ storage:
 logging:
   level: "info" # Optional: trace, debug, info, warn, error
   to_file: true # Whether to output to file
-  file_path: "./logs/scanner.log"
+  path: "./logs"
 
 metrics:
   enable: true

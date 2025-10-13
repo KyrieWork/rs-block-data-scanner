@@ -81,8 +81,8 @@ pub struct LoggingConfig {
     pub level: String,
     #[serde(default = "LoggingConfig::default_to_file")]
     pub to_file: bool,
-    #[serde(default = "LoggingConfig::default_file_path")]
-    pub file_path: String,
+    #[serde(default = "LoggingConfig::default_path")]
+    pub path: String,
 }
 
 impl LoggingConfig {
@@ -92,8 +92,8 @@ impl LoggingConfig {
     fn default_to_file() -> bool {
         true
     }
-    fn default_file_path() -> String {
-        "./logs/scanner.log".to_string()
+    fn default_path() -> String {
+        "./logs".to_string()
     }
 }
 

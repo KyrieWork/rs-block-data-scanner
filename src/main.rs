@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use rs_block_data_scanner::{
     chains::evm::scanner::EvmScanner,
@@ -16,12 +16,15 @@ async fn main() -> Result<()> {
     let args = Cli::parse();
     let cfg = AppConfig::load(&args.config)?;
 
-    // Initialize logger system
-    init_logger(
-        &cfg.logging.level,
-        cfg.logging.to_file,
-        &cfg.logging.file_path,
+    // Initialize log path
+    let log_path = format!(
+        "{}/{}.scanner.log",
+        cfg.logging.path.trim_end_matches('/'),
+        cfg.scanner.chain_name
     );
+
+    // Initialize logger system
+    init_logger(&cfg.logging.level, cfg.logging.to_file, &log_path);
 
     info!("✅ Configuration load successful");
     info!(chain = %cfg.scanner.chain_type, "Chain type configuration");
@@ -65,10 +68,24 @@ async fn main() -> Result<()> {
         "evm" => {
             info!("🚀 Starting EVM blockchain scanner...");
 
-            // Initialize storage
-            let storage = RocksDBStorage::new(&cfg.storage.path)?;
+            // Initialize storage with chain-specific path
+            let storage_path = format!(
+                "{}/{}",
+                cfg.storage.path.trim_end_matches('/'),
+                cfg.scanner.chain_name
+            );
+
+            // Create directory if not exists
+            std::fs::create_dir_all(&storage_path)
+                .with_context(|| format!("Failed to create storage directory: {}", storage_path))?;
+
+            let storage = RocksDBStorage::new(&storage_path)?;
             storage.init()?;
-            info!("✅ Storage initialized at: {}", cfg.storage.path);
+
+            info!("✅ Storage initialized");
+            info!("  └─ Path: {}", storage_path);
+            info!("  └─ Base: {}", cfg.storage.path);
+            info!("  └─ Chain: {}", cfg.scanner.chain_name);
 
             // Create EVM scanner
             let scanner = EvmScanner::new(cfg.scanner.clone(), cfg.rpc.url.clone(), storage)?;
