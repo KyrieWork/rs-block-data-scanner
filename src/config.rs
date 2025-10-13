@@ -54,6 +54,16 @@ pub struct ScannerConfig {
     pub realtime: bool,
     #[serde(default = "ScannerConfig::default_timeout_secs")]
     pub timeout_secs: u64,
+
+    // Cleanup configuration
+    #[serde(default = "ScannerConfig::default_cleanup_enabled")]
+    pub cleanup_enabled: bool,
+    #[serde(default)]
+    pub retention_blocks: Option<u64>,
+    #[serde(default = "ScannerConfig::default_cleanup_interval_secs")]
+    pub cleanup_interval_secs: u64,
+    #[serde(default = "ScannerConfig::default_cleanup_batch_size")]
+    pub cleanup_batch_size: usize,
 }
 
 impl ScannerConfig {
@@ -71,6 +81,15 @@ impl ScannerConfig {
     }
     fn default_timeout_secs() -> u64 {
         15
+    }
+    fn default_cleanup_enabled() -> bool {
+        false
+    }
+    fn default_cleanup_interval_secs() -> u64 {
+        3600 // 1 hour
+    }
+    fn default_cleanup_batch_size() -> usize {
+        1000
     }
 }
 

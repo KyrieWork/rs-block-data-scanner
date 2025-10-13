@@ -1,15 +1,15 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use rs_block_data_scanner::{
-    chains::evm::scanner::EvmScanner,
+    chains::evm::{cleaner::EvmCleaner, scanner::EvmScanner},
     cli::Cli,
     config::AppConfig,
-    core::scanner::Scanner,
+    core::{cleaner::Cleaner, scanner::Scanner},
     storage::{rocksdb::RocksDBStorage, traits::KVStorage},
     utils::logger::init_logger,
 };
 use tokio::sync::broadcast;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -88,10 +88,51 @@ async fn main() -> Result<()> {
             info!("  └─ Chain: {}", cfg.scanner.chain_name);
 
             // Create EVM scanner
-            let scanner = EvmScanner::new(cfg.scanner.clone(), cfg.rpc.url.clone(), storage)?;
+            let scanner =
+                EvmScanner::new(cfg.scanner.clone(), cfg.rpc.url.clone(), storage.clone())?;
 
             // Initialize scanner
             scanner.init().await?;
+
+            // Spawn cleanup task if enabled
+            if cfg.scanner.cleanup_enabled {
+                info!("🧹 Cleanup task enabled");
+                info!("  └─ Retention blocks: {:?}", cfg.scanner.retention_blocks);
+                info!(
+                    "  └─ Cleanup interval: {}s",
+                    cfg.scanner.cleanup_interval_secs
+                );
+                info!("  └─ Batch size: {}", cfg.scanner.cleanup_batch_size);
+
+                let cleaner = EvmCleaner::new(cfg.scanner.clone(), storage.clone());
+                let cleanup_interval = cfg.scanner.cleanup_interval_secs;
+                let mut shutdown_rx_cleanup = shutdown_tx.subscribe();
+
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = shutdown_rx_cleanup.recv() => {
+                                info!("🧹 Cleanup task received shutdown signal");
+                                break;
+                            }
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(cleanup_interval)) => {
+                                match cleaner.cleanup().await {
+                                    Ok(count) if count > 0 => {
+                                        info!("🧹 Cleanup cycle completed: {} blocks removed", count);
+                                    }
+                                    Ok(_) => {
+                                        debug!("🧹 Cleanup cycle completed: no blocks to remove");
+                                    }
+                                    Err(e) => {
+                                        warn!("⚠️ Cleanup failed: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    info!("🧹 Cleanup task stopped");
+                });
+            }
 
             // Start scanning with shutdown support
             info!("🔄 Starting block scanner...");

@@ -6,6 +6,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::storage::traits::KVStorage;
 
+#[derive(Clone)]
 pub struct RocksDBStorage {
     db: Arc<DB>,
 }
@@ -15,6 +16,18 @@ impl RocksDBStorage {
         let db = DB::open_default(path)
             .with_context(|| format!("Failed to open RocksDB at path: {}", path))?;
         Ok(Self { db: Arc::new(db) })
+    }
+
+    /// Delete multiple keys in a batch (atomic operation for better performance)
+    pub fn delete_batch(&self, keys: &[Vec<u8>]) -> Result<()> {
+        let mut batch = WriteBatch::default();
+        for key in keys {
+            batch.delete(key);
+        }
+        self.db
+            .write(batch)
+            .with_context(|| "Failed to execute batch delete")?;
+        Ok(())
     }
 }
 

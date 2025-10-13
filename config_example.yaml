@@ -23,6 +23,27 @@ scanner:
   # Node request timeout (seconds)
   timeout_secs: 15
 
+  # ============================
+  # Cleanup configuration
+  # ============================
+  
+  # Enable automatic cleanup of old block data
+  cleanup_enabled: false
+  
+  # Number of blocks to retain (blocks older than this will be deleted)
+  # Example: 10000 means keep the latest 10000 blocks
+  # If not set or 0, cleanup will be skipped
+  retention_blocks: 10000
+  
+  # Cleanup interval in seconds (how often to run cleanup)
+  # Default: 3600 (1 hour)
+  cleanup_interval_secs: 3600
+  
+  # Batch size for cleanup operations (blocks per batch)
+  # Larger batches are faster but use more memory
+  # Default: 1000
+  cleanup_batch_size: 1000
+
 # ============================
 # RPC node configuration
 # ============================

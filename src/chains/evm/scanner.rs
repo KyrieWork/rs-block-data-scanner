@@ -54,6 +54,7 @@ impl EvmScanner {
             updated_at: Utc::now(),
             reorg_block: None,
             finalized_block: None,
+            min_block: None,
             version: crate::storage::schema::SCHEMA_VERSION,
         }
     }
@@ -323,7 +324,16 @@ impl EvmScanner {
 impl Scanner for EvmScanner {
     async fn init(&self) -> Result<()> {
         let key = keys::progress_key(&self.scanner_cfg.chain_name);
-        if self.storage.read_json::<ScannerProgress>(&key)?.is_none() {
+
+        if let Some(mut progress) = self.storage.read_json::<ScannerProgress>(&key)? {
+            // Progress exists, check and initialize min_block if not set
+            if progress.min_block.is_none() {
+                progress.min_block = Some(progress.current_block);
+                self.storage.write_json(&key, &progress)?;
+                info!("  └─ Initialized min_block: {}", progress.current_block);
+            }
+        } else {
+            // First time, create initial progress
             let initial_block = if self.scanner_cfg.start_block == 0 {
                 let last_block = self.provider.get_block_number().await?;
                 if self.scanner_cfg.confirm_blocks <= last_block {
@@ -334,16 +344,20 @@ impl Scanner for EvmScanner {
             } else {
                 self.scanner_cfg.start_block
             };
+
             let mut progress = self.create_initial_progress();
             progress.current_block = initial_block;
             progress.target_block = initial_block;
+            progress.min_block = Some(initial_block);
 
             info!(
                 "✅ Initial progress created: current_block={}",
                 progress.current_block
             );
+            info!("  └─ Initialized min_block: {}", initial_block);
             self.storage.write_json(&key, &progress)?;
         }
+
         Ok(())
     }
 
@@ -406,7 +420,33 @@ impl Scanner for EvmScanner {
 mod tests {
     use super::*;
 
-    fn create_test_scanner_with_name(test_name: &str) -> EvmScanner {
+    // Test configuration constants
+    const TEST_CHAIN_NAME: &str = "anvil";
+    const TEST_RPC_URL: &str = "http://127.0.0.1:8545";
+    const DEFAULT_START_BLOCK: u64 = 100;
+
+    // Helper function to create default test config
+    fn create_default_test_config() -> ScannerConfig {
+        ScannerConfig {
+            chain_type: "evm".to_string(),
+            chain_name: TEST_CHAIN_NAME.to_string(),
+            concurrency: 1,
+            start_block: DEFAULT_START_BLOCK,
+            confirm_blocks: 1,
+            realtime: true,
+            timeout_secs: 15,
+            cleanup_enabled: false,
+            retention_blocks: None,
+            cleanup_interval_secs: 3600,
+            cleanup_batch_size: 1000,
+        }
+    }
+
+    // Helper function to create test scanner with custom config
+    fn create_test_scanner_with_config(
+        test_name: &str,
+        config: ScannerConfig,
+    ) -> (EvmScanner, String) {
         let temp_dir = std::env::temp_dir();
         let path = temp_dir.join(format!("rocksdb_test_{}_{}", test_name, std::process::id()));
         let path_str = path.to_str().unwrap().to_string();
@@ -414,20 +454,20 @@ mod tests {
         // Clean up if exists from previous failed test
         let _ = std::fs::remove_dir_all(&path_str);
 
-        EvmScanner::new(
-            ScannerConfig {
-                chain_type: "evm".to_string(),
-                chain_name: "anvil".to_string(),
-                concurrency: 1,
-                start_block: 100,
-                confirm_blocks: 1,
-                realtime: true,
-                timeout_secs: 15,
-            },
-            "http://127.0.0.1:8545".to_string(),
+        let scanner = EvmScanner::new(
+            config,
+            TEST_RPC_URL.to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
         )
-        .unwrap()
+        .unwrap();
+
+        (scanner, path_str)
+    }
+
+    // Helper function to create test scanner with default config
+    fn create_test_scanner_with_name(test_name: &str) -> EvmScanner {
+        let (scanner, _) = create_test_scanner_with_config(test_name, create_default_test_config());
+        scanner
     }
 
     #[tokio::test]
@@ -635,17 +675,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path_str);
 
         // Create scanner with very short timeout
+        let mut config = create_default_test_config();
+        config.start_block = 1;
+        config.timeout_secs = 1; // Very short timeout for testing
+
         let scanner = EvmScanner::new(
-            ScannerConfig {
-                chain_type: "evm".to_string(),
-                chain_name: "anvil".to_string(),
-                concurrency: 1,
-                start_block: 1,
-                confirm_blocks: 1,
-                realtime: true,
-                timeout_secs: 1, // Very short timeout for testing
-            },
-            "http://127.0.0.1:8545".to_string(),
+            config,
+            TEST_RPC_URL.to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
         )
         .unwrap();
@@ -748,6 +784,10 @@ mod tests {
                 confirm_blocks: 1,
                 realtime: true,
                 timeout_secs: 15,
+                cleanup_enabled: false,
+                retention_blocks: None,
+                cleanup_interval_secs: 3600,
+                cleanup_batch_size: 1000,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
@@ -796,6 +836,10 @@ mod tests {
                 confirm_blocks: 1,
                 realtime: true,
                 timeout_secs: 15,
+                cleanup_enabled: false,
+                retention_blocks: None,
+                cleanup_interval_secs: 3600,
+                cleanup_batch_size: 1000,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
@@ -865,6 +909,10 @@ mod tests {
                 confirm_blocks: 1,
                 realtime: true,
                 timeout_secs: 15,
+                cleanup_enabled: false,
+                retention_blocks: None,
+                cleanup_interval_secs: 3600,
+                cleanup_batch_size: 1000,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
@@ -904,6 +952,10 @@ mod tests {
                 confirm_blocks: 1,
                 realtime: true,
                 timeout_secs: 15,
+                cleanup_enabled: false,
+                retention_blocks: None,
+                cleanup_interval_secs: 3600,
+                cleanup_batch_size: 1000,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
@@ -979,6 +1031,10 @@ mod tests {
                 confirm_blocks: 1,
                 realtime: true,
                 timeout_secs: 15,
+                cleanup_enabled: false,
+                retention_blocks: None,
+                cleanup_interval_secs: 3600,
+                cleanup_batch_size: 1000,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
@@ -1010,31 +1066,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_reorg_before_start_block() -> Result<()> {
-        let temp_dir = std::env::temp_dir();
-        let path = temp_dir.join(format!(
-            "rocksdb_test_reorg_before_start_{}",
-            std::process::id()
-        ));
-        let path_str = path.to_str().unwrap().to_string();
-
-        // Clean up if exists
-        let _ = std::fs::remove_dir_all(&path_str);
-
         // Create scanner with start_block = 10
-        let scanner = EvmScanner::new(
-            ScannerConfig {
-                chain_type: "evm".to_string(),
-                chain_name: "anvil".to_string(),
-                concurrency: 1,
-                start_block: 10,
-                confirm_blocks: 1,
-                realtime: true,
-                timeout_secs: 15,
-            },
-            "http://127.0.0.1:8545".to_string(),
-            RocksDBStorage::new(&path_str).unwrap(),
-        )
-        .unwrap();
+        let mut config = create_default_test_config();
+        config.start_block = 10;
+        let (scanner, _path) = create_test_scanner_with_config("reorg_before_start", config);
 
         scanner.init().await?;
 
@@ -1059,6 +1094,68 @@ mod tests {
         );
 
         println!("Handle reorg before start_block test passed!");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_init_min_block() -> Result<()> {
+        let scanner = create_test_scanner_with_name("init_min_block");
+
+        // Initialize scanner
+        scanner.init().await?;
+
+        // Get progress and verify min_block is set
+        let progress = scanner.get_progress()?;
+        assert!(
+            progress.min_block.is_some(),
+            "min_block should be initialized"
+        );
+        assert_eq!(
+            progress.min_block.unwrap(),
+            progress.current_block,
+            "min_block should equal current_block on first init"
+        );
+
+        println!("✅ Min block initialized: {}", progress.min_block.unwrap());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_init_min_block_for_existing_progress() -> Result<()> {
+        let scanner = create_test_scanner_with_name("init_min_block_existing");
+
+        // First init
+        scanner.init().await?;
+
+        // Manually clear min_block to simulate old data
+        let mut progress = scanner.get_progress()?;
+        let original_current = progress.current_block;
+        progress.min_block = None;
+        scanner.update_progress(progress)?;
+
+        // Verify min_block is cleared
+        let progress_without_min = scanner.get_progress()?;
+        assert!(
+            progress_without_min.min_block.is_none(),
+            "min_block should be None after manual clear"
+        );
+
+        // Re-init should set min_block
+        scanner.init().await?;
+
+        // Verify min_block is now set
+        let progress_with_min = scanner.get_progress()?;
+        assert!(
+            progress_with_min.min_block.is_some(),
+            "min_block should be set after re-init"
+        );
+        assert_eq!(
+            progress_with_min.min_block.unwrap(),
+            original_current,
+            "min_block should equal current_block"
+        );
+
+        println!("✅ Min block initialized for existing progress");
         Ok(())
     }
 }

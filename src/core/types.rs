@@ -31,6 +31,10 @@ pub struct ScannerProgress {
     /// Final confirmed block (e.g. EVM finality 12 blocks)
     pub finalized_block: Option<u64>,
 
+    /// Minimum block number stored in database (for cleanup tracking)
+    #[serde(default)]
+    pub min_block: Option<u64>,
+
     /// Data version number, for future schema compatibility upgrade
     pub version: u32,
 }
