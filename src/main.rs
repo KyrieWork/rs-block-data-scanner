@@ -8,12 +8,12 @@ use rs_block_data_scanner::{
     storage::{rocksdb::RocksDBStorage, traits::KVStorage},
     utils::logger::init_logger,
 };
-use tracing::{info, warn};
+use tokio::sync::broadcast;
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Cli::parse();
-
     let cfg = AppConfig::load(&args.config)?;
 
     // Initialize logger system
@@ -29,10 +29,41 @@ async fn main() -> Result<()> {
     info!(start_block = cfg.scanner.start_block, "Start block number");
     info!(rpc_url = %cfg.rpc.url, "RPC node");
 
-    // Simulate service startup (here can be expanded to start different modules according to chain_type)
+    // Create shutdown channel
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+
+    // Spawn signal handler task for Ctrl+C
+    let shutdown_tx_sigint = shutdown_tx.clone();
+    tokio::spawn(async move {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            error!("Failed to listen for Ctrl+C: {}", e);
+            return;
+        }
+
+        info!("📡 Received shutdown signal (Ctrl+C)");
+        // Send shutdown signal (ignore error if receiver is dropped)
+        let _ = shutdown_tx_sigint.send(());
+    });
+
+    // SIGTERM handler (Unix only)
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let shutdown_tx_sigterm = shutdown_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+                sigterm.recv().await;
+                info!("📡 Received SIGTERM signal");
+                let _ = shutdown_tx_sigterm.send(());
+            }
+        });
+    }
+
+    // Start scanner based on chain type
     match cfg.scanner.chain_type.as_str() {
         "evm" => {
-            info!("🚀 Start EVM blockchain data scanning service...");
+            info!("🚀 Starting EVM blockchain scanner...");
 
             // Initialize storage
             let storage = RocksDBStorage::new(&cfg.storage.path)?;
@@ -42,12 +73,16 @@ async fn main() -> Result<()> {
             // Create EVM scanner
             let scanner = EvmScanner::new(cfg.scanner.clone(), cfg.rpc.url.clone(), storage)?;
 
-            // Initialize scanner (creates initial progress if not exists)
+            // Initialize scanner
             scanner.init().await?;
 
-            // Start scanning loop
+            // Start scanning with shutdown support
             info!("🔄 Starting block scanner...");
-            scanner.run().await?;
+            info!("💡 Press Ctrl+C to stop gracefully");
+
+            scanner.run(shutdown_rx).await?;
+
+            info!("✨ Scanner exited successfully");
         }
         "solana" => {
             info!("🚀 Start Solana blockchain data scanning service...");

@@ -15,6 +15,7 @@ use alloy::{
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
+use tokio::sync::broadcast;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
@@ -192,6 +193,130 @@ impl EvmScanner {
 
         Ok(())
     }
+
+    /// Scan the next block (extracted from run method for clarity)
+    async fn scan_next_block(&self) -> Result<()> {
+        // Read current progress
+        let mut progress = self.get_progress()?;
+
+        // Get target block and network latest block
+        let (target_block, network_latest_block) = self.get_target_block().await?;
+
+        // Update network info
+        progress.network_latest_block = Some(network_latest_block);
+        progress.target_block = target_block;
+
+        // Check if there are new blocks to scan
+        if target_block > progress.current_block {
+            let scan_block = progress.current_block + 1;
+
+            // Fetch block data
+            let block_data = self.fetch_block(scan_block);
+
+            match timeout(
+                Duration::from_secs(self.scanner_cfg.timeout_secs),
+                block_data,
+            )
+            .await
+            {
+                Ok(Ok(block_data)) => {
+                    // Verify reorg before storing
+                    let needs_reorg_check = scan_block > self.scanner_cfg.start_block;
+
+                    if needs_reorg_check {
+                        // Parse parent_hash from block_data_json
+                        let block: serde_json::Value =
+                            serde_json::from_str(&block_data.block_data_json)?;
+                        let parent_hash = block["parentHash"].as_str().ok_or_else(|| {
+                            anyhow::anyhow!("Failed to parse parent_hash from block data")
+                        })?;
+
+                        // Verify reorg
+                        match self.verify_reorg(parent_hash, scan_block) {
+                            Ok(true) => {
+                                // No reorg detected, proceed with storing
+                                self.store_block_data(scan_block, &block_data)?;
+                                progress.current_block = scan_block;
+
+                                // Clear reorg status if recovering from reorg
+                                if progress.status == "reorg_detected" {
+                                    info!("✅ Recovered from reorg at block {}", scan_block);
+                                    progress.reorg_block = None;
+                                }
+
+                                // Set status based on how far behind we are
+                                let blocks_behind = target_block.saturating_sub(scan_block);
+                                progress.status = if blocks_behind > 10 {
+                                    "catching_up".to_string()
+                                } else if blocks_behind > 0 {
+                                    "scanning".to_string()
+                                } else {
+                                    "synced".to_string()
+                                };
+
+                                progress.updated_at = Utc::now();
+                                self.update_progress(progress.clone())?;
+
+                                info!(
+                                    "✅ Scanned block {} - Status: {}",
+                                    scan_block, progress.status
+                                );
+                            }
+                            Ok(false) => {
+                                // Reorg detected, handle rollback
+                                self.handle_reorg(scan_block)?;
+                                info!("🔄 Reorg handled, will retry from rolled back position");
+                            }
+                            Err(e) => {
+                                error!("❌ Failed to verify reorg: {}", e);
+                            }
+                        }
+                    } else {
+                        // First block or start_block, skip reorg check
+                        self.store_block_data(scan_block, &block_data)?;
+                        progress.current_block = scan_block;
+                        progress.status = "scanning".to_string();
+                        progress.updated_at = Utc::now();
+                        self.update_progress(progress.clone())?;
+
+                        info!("✅ Scanned block {} (no reorg check)", scan_block);
+                    }
+                }
+                Ok(Err(e)) => {
+                    error!("❌ Fetch block data failed: {}", e);
+                }
+                Err(e) => {
+                    error!("❌ Fetch block data timeout: {}", e);
+                }
+            }
+        } else {
+            // Already caught up, set to idle
+            progress.status = "idle".to_string();
+            progress.updated_at = Utc::now();
+            self.update_progress(progress.clone())?;
+
+            info!("🔄 Already caught up - Status: {}", progress.status);
+        }
+
+        Ok(())
+    }
+
+    /// Print final scanner status before shutdown
+    fn print_final_status(&self) -> Result<()> {
+        info!("📊 Final scanner status:");
+        let final_progress = self.get_progress()?;
+        info!("  └─ Chain: {}", final_progress.chain);
+        info!("  └─ Current block: {}", final_progress.current_block);
+        info!("  └─ Target block: {}", final_progress.target_block);
+        if let Some(network_latest) = final_progress.network_latest_block {
+            info!("  └─ Network latest: {}", network_latest);
+        }
+        info!("  └─ Status: {}", final_progress.status);
+        if let Some(reorg_block) = final_progress.reorg_block {
+            info!("  └─ Reorg block: {}", reorg_block);
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -247,113 +372,33 @@ impl Scanner for EvmScanner {
         })
     }
 
-    async fn run(&self) -> Result<()> {
+    async fn run(&self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
+        info!("🔄 Scanner loop started");
+
         loop {
-            // Read current progress
-            let mut progress = self.get_progress()?;
+            tokio::select! {
+                    // Branch 1: Wait for shutdown signal
+                    _ = shutdown.recv() => {
+                        info!("🛑 Shutdown signal received, stopping scanner gracefully...");
+                        break;
+                    }
 
-            // Get target block and network latest block
-            let (target_block, network_latest_block) = self.get_target_block().await?;
-
-            // Update network info
-            progress.network_latest_block = Some(network_latest_block);
-            progress.target_block = target_block;
-
-            // Check if there are new blocks to scan
-            if target_block > progress.current_block {
-                let scan_block = progress.current_block + 1;
-
-                // Fetch block data
-                let block_data = self.fetch_block(scan_block);
-
-                match timeout(
-                    Duration::from_secs(self.scanner_cfg.timeout_secs),
-                    block_data,
-                )
-                .await
-                {
-                    Ok(Ok(block_data)) => {
-                        // Verify reorg before storing
-                        let needs_reorg_check = scan_block > self.scanner_cfg.start_block;
-
-                        if needs_reorg_check {
-                            // Parse parent_hash from block_data_json
-                            let block: serde_json::Value =
-                                serde_json::from_str(&block_data.block_data_json)?;
-                            let parent_hash = block["parentHash"].as_str().ok_or_else(|| {
-                                anyhow::anyhow!("Failed to parse parent_hash from block data")
-                            })?;
-
-                            // Verify reorg
-                            match self.verify_reorg(parent_hash, scan_block) {
-                                Ok(true) => {
-                                    // No reorg detected, proceed with storing
-                                    self.store_block_data(scan_block, &block_data)?;
-                                    progress.current_block = scan_block;
-
-                                    // Clear reorg status if recovering from reorg
-                                    if progress.status == "reorg_detected" {
-                                        info!("✅ Recovered from reorg at block {}", scan_block);
-                                        progress.reorg_block = None;
-                                    }
-
-                                    // Set status based on how far behind we are
-                                    let blocks_behind = target_block.saturating_sub(scan_block);
-                                    progress.status = if blocks_behind > 10 {
-                                        "catching_up".to_string()
-                                    } else if blocks_behind > 0 {
-                                        "scanning".to_string()
-                                    } else {
-                                        "synced".to_string()
-                                    };
-
-                                    progress.updated_at = Utc::now();
-                                    self.update_progress(progress.clone())?;
-
-                                    info!(
-                                        "✅ Scanned block {} - Status: {}",
-                                        scan_block, progress.status
-                                    );
-                                }
-                                Ok(false) => {
-                                    // Reorg detected, handle rollback
-                                    self.handle_reorg(scan_block)?;
-                                    info!("🔄 Reorg handled, will retry from rolled back position");
-                                }
-                                Err(e) => {
-                                    error!("❌ Failed to verify reorg: {}", e);
-                                }
-                            }
-                        } else {
-                            // First block or start_block, skip reorg check
-                            self.store_block_data(scan_block, &block_data)?;
-                            progress.current_block = scan_block;
-                            progress.status = "scanning".to_string();
-                            progress.updated_at = Utc::now();
-                            self.update_progress(progress.clone())?;
-
-                            info!("✅ Scanned block {} (no reorg check)", scan_block);
+                    // Branch 2: Execute scanning logic
+                    result = self.scan_next_block() => {
+                        if let Err(e) = result {
+                            error!("❌ Scan error: {}", e);
                         }
-                    }
-                    Ok(Err(e)) => {
-                        error!("❌ Fetch block data failed: {}", e);
-                    }
-                    Err(e) => {
-                        error!("❌ Fetch block data timeout: {}", e);
-                    }
-                }
-            } else {
-                // Already caught up, set to idle
-                progress.status = "idle".to_string();
-                progress.updated_at = Utc::now();
-                self.update_progress(progress.clone())?;
-
-                info!("🔄 Already caught up - Status: {}", progress.status);
+                // Wait for next scan cycle
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
-
-            // Wait for next scan cycle
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                }
         }
+
+        // Print final status after loop exits
+        self.print_final_status()?;
+
+        info!("👋 Scanner stopped gracefully");
+        Ok(())
     }
 }
 
