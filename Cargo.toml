@@ -3,6 +3,12 @@ name = "rs-block-data-scanner"
 version = "0.1.0"
 edition = "2024"
 
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+
 [lib]
 name = "rs_block_data_scanner"
 path = "src/lib.rs"
