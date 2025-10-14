@@ -127,6 +127,12 @@ async fn main() -> Result<()> {
                                         warn!("⚠️ Cleanup failed: {}", e);
                                     }
                                 }
+
+                                // Print database size after cleanup
+                                match storage.get_db_size() {
+                                    Ok(size) => info!("💾 Database size: {}", size),
+                                    Err(e) => debug!("Failed to get database size: {}", e),
+                                }
                             }
                         }
                     }

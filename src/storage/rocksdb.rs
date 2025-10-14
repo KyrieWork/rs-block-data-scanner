@@ -29,6 +29,63 @@ impl RocksDBStorage {
             .with_context(|| "Failed to execute batch delete")?;
         Ok(())
     }
+
+    /// Get database size using RocksDB internal properties
+    /// Returns size in human-readable format (e.g., "1.23 GB")
+    pub fn get_db_size(&self) -> Result<String> {
+        // Get total SST files size (most accurate for actual data)
+        let total_sst = self
+            .db
+            .property_value("rocksdb.total-sst-files-size")?
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        // Get live data size estimate
+        let live_data = self
+            .db
+            .property_value("rocksdb.estimate-live-data-size")?
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        // Use the larger of the two for more accurate reporting
+        let size_bytes = total_sst.max(live_data);
+
+        Ok(format_size_bytes(size_bytes))
+    }
+
+    /// Get detailed database statistics
+    pub fn get_db_stats(&self) -> Result<(String, u64)> {
+        let total_sst = self
+            .db
+            .property_value("rocksdb.total-sst-files-size")?
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        let num_keys = self
+            .db
+            .property_value("rocksdb.estimate-num-keys")?
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        Ok((format_size_bytes(total_sst), num_keys))
+    }
+}
+
+/// Format bytes into human-readable format
+fn format_size_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+
+    let bytes_f = bytes as f64;
+    let exp = (bytes_f.ln() / 1024_f64.ln()).floor() as usize;
+    let exp = exp.min(UNITS.len() - 1);
+
+    let size = bytes_f / 1024_f64.powi(exp as i32);
+
+    format!("{:.2} {}", size, UNITS[exp])
 }
 
 impl KVStorage for RocksDBStorage {
