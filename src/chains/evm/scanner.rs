@@ -196,7 +196,8 @@ impl EvmScanner {
     }
 
     /// Scan the next block (extracted from run method for clarity)
-    async fn scan_next_block(&self) -> Result<()> {
+    /// Returns the updated progress after scanning
+    async fn scan_next_block(&self) -> Result<ScannerProgress> {
         // Read current progress
         let mut progress = self.get_progress()?;
 
@@ -258,6 +259,18 @@ impl EvmScanner {
                                 progress.updated_at = Utc::now();
                                 self.update_progress(progress.clone())?;
 
+                                // Log progress details from database
+                                if let Ok(db_progress) = self.get_progress() {
+                                    debug!(
+                                        "📝 Progress updated - current: {}, target: {}, network: {:?}, status: {}, min_block: {:?}",
+                                        db_progress.current_block,
+                                        db_progress.target_block,
+                                        db_progress.network_latest_block,
+                                        db_progress.status,
+                                        db_progress.min_block
+                                    );
+                                }
+
                                 info!(
                                     "✅ Scanned block {} - Status: {}",
                                     scan_block, progress.status
@@ -280,6 +293,18 @@ impl EvmScanner {
                         progress.updated_at = Utc::now();
                         self.update_progress(progress.clone())?;
 
+                        // Log progress details from database
+                        if let Ok(db_progress) = self.get_progress() {
+                            debug!(
+                                "📝 Progress updated - current: {}, target: {}, network: {:?}, status: {}, min_block: {:?}",
+                                db_progress.current_block,
+                                db_progress.target_block,
+                                db_progress.network_latest_block,
+                                db_progress.status,
+                                db_progress.min_block
+                            );
+                        }
+
                         info!("✅ Scanned block {} (no reorg check)", scan_block);
                     }
                 }
@@ -296,10 +321,23 @@ impl EvmScanner {
             progress.updated_at = Utc::now();
             self.update_progress(progress.clone())?;
 
+            // Log progress details from database
+            if let Ok(db_progress) = self.get_progress() {
+                debug!(
+                    "📝 Progress updated - current: {}, target: {}, network: {:?}, status: {}, min_block: {:?}",
+                    db_progress.current_block,
+                    db_progress.target_block,
+                    db_progress.network_latest_block,
+                    db_progress.status,
+                    db_progress.min_block
+                );
+            }
+
             info!("🔄 Already caught up - Status: {}", progress.status);
         }
 
-        Ok(())
+        // Return the updated progress
+        self.get_progress()
     }
 
     /// Print final scanner status before shutdown
@@ -317,6 +355,30 @@ impl EvmScanner {
             info!("  └─ Reorg block: {}", reorg_block);
         }
         Ok(())
+    }
+
+    /// Check if scanner is synced with the network
+    /// Returns true if current block is close to network latest block
+    fn is_synced(&self, current_block: u64, network_latest_block: u64) -> bool {
+        let gap = network_latest_block.saturating_sub(current_block);
+        gap <= self.scanner_cfg.confirm_blocks
+    }
+
+    /// Get dynamic scan interval based on sync status
+    /// - Synced: 3 seconds
+    /// - Catching up: 500 milliseconds
+    fn get_scan_interval(
+        &self,
+        current_block: u64,
+        network_latest_block: u64,
+    ) -> std::time::Duration {
+        if self.is_synced(current_block, network_latest_block) {
+            // Synced: use longer interval
+            std::time::Duration::from_secs(3)
+        } else {
+            // Catching up: use shorter interval
+            std::time::Duration::from_millis(100)
+        }
     }
 }
 
@@ -391,21 +453,38 @@ impl Scanner for EvmScanner {
 
         loop {
             tokio::select! {
-                    // Branch 1: Wait for shutdown signal
-                    _ = shutdown.recv() => {
-                        info!("🛑 Shutdown signal received, stopping scanner gracefully...");
-                        break;
-                    }
-
-                    // Branch 2: Execute scanning logic
-                    result = self.scan_next_block() => {
-                        if let Err(e) = result {
-                            error!("❌ Scan error: {}", e);
-                        }
-                // Wait for next scan cycle
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            }
+                // Branch 1: Wait for shutdown signal
+                _ = shutdown.recv() => {
+                    info!("🛑 Shutdown signal received, stopping scanner gracefully...");
+                    break;
                 }
+
+                // Branch 2: Execute scanning logic
+                result = self.scan_next_block() => {
+                    match result {
+                        Ok(progress) => {
+                            // Calculate dynamic interval based on sync status
+                            let network_latest = progress.network_latest_block.unwrap_or(progress.current_block);
+                            let interval = self.get_scan_interval(progress.current_block, network_latest);
+
+                            // Log sync status
+                            let gap = network_latest.saturating_sub(progress.current_block);
+                            if self.is_synced(progress.current_block, network_latest) {
+                                debug!("⏱️  Synced with network (gap: {}), waiting {:?}", gap, interval);
+                            } else {
+                                debug!("⚡ Catching up (gap: {}), waiting {:?}", gap, interval);
+                            }
+
+                            tokio::time::sleep(interval).await;
+                        }
+                        Err(e) => {
+                            error!("❌ Scan error: {}", e);
+                            // Use default interval on error
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        }
+                    }
+                }
+            }
         }
 
         // Print final status after loop exits

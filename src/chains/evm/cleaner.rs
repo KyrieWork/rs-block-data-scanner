@@ -97,17 +97,17 @@ impl Cleaner for EvmCleaner {
                 let block_receipts_key =
                     keys::block_receipts_key(&self.scanner_cfg.chain_name, block_num);
 
-                // Only delete if exists (optional optimization)
-                if self.storage.exists(&block_data_key)? {
-                    keys_to_delete.push(block_data_key.into_bytes());
-                    keys_to_delete.push(block_receipts_key.into_bytes());
-                    cleaned_count += 1;
-                }
+                // Directly add to delete queue, RocksDB will ignore non-existent keys
+                keys_to_delete.push(block_data_key.into_bytes());
+                keys_to_delete.push(block_receipts_key.into_bytes());
             }
 
             // Batch delete
             if !keys_to_delete.is_empty() {
                 self.storage.delete_batch(&keys_to_delete)?;
+                // Calculate cleaned count from number of keys (2 keys per block)
+                let batch_cleaned = keys_to_delete.len() / 2;
+                cleaned_count += batch_cleaned;
             }
 
             // Log progress
@@ -315,7 +315,7 @@ mod tests {
 
         // Cleanup should remove blocks 100-109 (keep latest 10)
         let result = cleaner.cleanup().await?;
-        assert_eq!(result, 10, "Should clean 10 blocks");
+        assert_eq!(result, 10, "Should attempt to clean 10 blocks");
 
         // Verify blocks 100-109 are deleted
         for block_num in 100..110 {
@@ -366,7 +366,7 @@ mod tests {
 
         // Cleanup should remove blocks 100-239 (keep latest 10: 240-249)
         let result = cleaner.cleanup().await?;
-        assert_eq!(result, 140, "Should clean 140 blocks");
+        assert_eq!(result, 140, "Should attempt to clean 140 blocks");
 
         // Verify old blocks are deleted
         for block_num in 100..240 {
@@ -412,9 +412,12 @@ mod tests {
 
         let cleaner = EvmCleaner::new(config, storage.clone());
 
-        // Cleanup should not fail, just return 0
+        // Cleanup should not fail, returns attempt count even if blocks don't exist
         let result = cleaner.cleanup().await?;
-        assert_eq!(result, 0, "Should clean 0 blocks when none exist");
+        assert_eq!(
+            result, 10,
+            "Should attempt to clean 10 blocks (RocksDB ignores non-existent keys)"
+        );
 
         println!("✅ No existing blocks test passed");
         Ok(())
