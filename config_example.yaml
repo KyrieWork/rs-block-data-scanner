@@ -43,6 +43,11 @@ scanner:
   # Larger batches are faster but use more memory
   # Default: 1000
   cleanup_batch_size: 1000
+  
+  # Enable cleanup of orphaned data (blocks not referenced by active indexes)
+  # This is more resource-intensive as it scans all block data
+  # Default: false (disabled)
+  cleanup_orphaned_enabled: false
 
 # ============================
 # RPC node configuration

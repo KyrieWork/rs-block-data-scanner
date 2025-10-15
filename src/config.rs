@@ -64,6 +64,8 @@ pub struct ScannerConfig {
     pub cleanup_interval_secs: u64,
     #[serde(default = "ScannerConfig::default_cleanup_batch_size")]
     pub cleanup_batch_size: usize,
+    #[serde(default = "ScannerConfig::default_cleanup_orphaned_enabled")]
+    pub cleanup_orphaned_enabled: bool,
 }
 
 impl ScannerConfig {
@@ -90,6 +92,9 @@ impl ScannerConfig {
     }
     fn default_cleanup_batch_size() -> usize {
         1000
+    }
+    fn default_cleanup_orphaned_enabled() -> bool {
+        false
     }
 }
 

@@ -620,6 +620,7 @@ mod tests {
             retention_blocks: None,
             cleanup_interval_secs: 3600,
             cleanup_batch_size: 1000,
+            cleanup_orphaned_enabled: false,
         }
     }
 
@@ -929,6 +930,7 @@ mod tests {
                 retention_blocks: None,
                 cleanup_interval_secs: 3600,
                 cleanup_batch_size: 1000,
+                cleanup_orphaned_enabled: false,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
@@ -981,6 +983,7 @@ mod tests {
                 retention_blocks: None,
                 cleanup_interval_secs: 3600,
                 cleanup_batch_size: 1000,
+                cleanup_orphaned_enabled: false,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
@@ -1054,6 +1057,7 @@ mod tests {
                 retention_blocks: None,
                 cleanup_interval_secs: 3600,
                 cleanup_batch_size: 1000,
+                cleanup_orphaned_enabled: false,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
@@ -1097,6 +1101,7 @@ mod tests {
                 retention_blocks: None,
                 cleanup_interval_secs: 3600,
                 cleanup_batch_size: 1000,
+                cleanup_orphaned_enabled: false,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
@@ -1189,6 +1194,7 @@ mod tests {
                 retention_blocks: None,
                 cleanup_interval_secs: 3600,
                 cleanup_batch_size: 1000,
+                cleanup_orphaned_enabled: false,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
