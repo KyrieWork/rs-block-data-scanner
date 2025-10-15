@@ -4,9 +4,13 @@ use tracing::{debug, info};
 
 use crate::{
     config::ScannerConfig,
-    core::{cleaner::Cleaner, types::ScannerProgress},
+    core::{
+        cleaner::Cleaner,
+        table::{BlockIndex, ScannerProgress},
+    },
     storage::{rocksdb::RocksDBStorage, schema::keys, traits::KVStorage},
 };
+use std::collections::HashSet;
 
 pub struct EvmCleaner {
     scanner_cfg: ScannerConfig,
@@ -74,56 +78,27 @@ impl Cleaner for EvmCleaner {
         }
 
         info!(
-            "🧹 Starting cleanup: current={}, retention={}, threshold={}, range=[{}, {})",
-            current_block, retention_blocks, cleanup_threshold, min_stored_block, cleanup_threshold
+            "🧹 Starting cleanup: current={}, retention={}, threshold={}",
+            current_block, retention_blocks, cleanup_threshold
         );
 
-        // Batch delete for high performance
-        let batch_size = self.scanner_cfg.cleanup_batch_size;
-        let mut cleaned_count = 0;
-        let total_to_clean = (cleanup_threshold - min_stored_block) as usize;
+        // 1. Clean up expired active indexes
+        let active_cleaned = self
+            .cleanup_expired_active_indexes(min_stored_block, cleanup_threshold)
+            .await?;
 
-        let mut current_batch_start = min_stored_block;
+        // 2. Clean up expired history indexes
+        let history_cleaned = self
+            .cleanup_expired_history_indexes(min_stored_block, cleanup_threshold)
+            .await?;
 
-        while current_batch_start < cleanup_threshold {
-            let batch_end =
-                std::cmp::min(current_batch_start + batch_size as u64, cleanup_threshold);
+        // 3. Clean up orphaned block data
+        let data_cleaned = self.cleanup_orphaned_block_data().await?;
 
-            // Collect keys to delete in this batch
-            let mut keys_to_delete: Vec<Vec<u8>> = Vec::with_capacity(batch_size * 2);
-
-            for block_num in current_batch_start..batch_end {
-                let block_data_key = keys::block_data_key(&self.scanner_cfg.chain_name, block_num);
-                let block_receipts_key =
-                    keys::block_receipts_key(&self.scanner_cfg.chain_name, block_num);
-
-                // Directly add to delete queue, RocksDB will ignore non-existent keys
-                keys_to_delete.push(block_data_key.into_bytes());
-                keys_to_delete.push(block_receipts_key.into_bytes());
-            }
-
-            // Batch delete
-            if !keys_to_delete.is_empty() {
-                self.storage.delete_batch(&keys_to_delete)?;
-                // Calculate cleaned count from number of keys (2 keys per block)
-                let batch_cleaned = keys_to_delete.len() / 2;
-                cleaned_count += batch_cleaned;
-            }
-
-            // Log progress
-            if cleaned_count > 0 {
-                let progress_pct = (cleaned_count * 100) / total_to_clean.max(1);
-                debug!(
-                    "  └─ Cleaned {}/{} blocks ({}%)",
-                    cleaned_count, total_to_clean, progress_pct
-                );
-            }
-
-            current_batch_start = batch_end;
-        }
+        let total_cleaned = active_cleaned + history_cleaned + data_cleaned;
 
         // Update min_block in progress
-        if cleaned_count > 0 {
+        if total_cleaned > 0 {
             let updated_progress = ScannerProgress {
                 min_block: Some(cleanup_threshold),
                 ..progress
@@ -131,14 +106,158 @@ impl Cleaner for EvmCleaner {
             self.storage.write_json(&progress_key, &updated_progress)?;
 
             info!(
-                "✅ Cleanup completed: {} blocks removed, new min_block: {}",
-                cleaned_count, cleanup_threshold
+                "✅ Cleanup completed: active={}, history={}, data={}, total={}, new min_block: {}",
+                active_cleaned, history_cleaned, data_cleaned, total_cleaned, cleanup_threshold
             );
         } else {
-            debug!("No blocks found to clean in the specified range");
+            debug!("No data found to clean in the specified range");
         }
 
+        Ok(total_cleaned)
+    }
+}
+
+impl EvmCleaner {
+    /// Clean up expired active indexes
+    async fn cleanup_expired_active_indexes(
+        &self,
+        min_block: u64,
+        max_block: u64,
+    ) -> Result<usize> {
+        let mut cleaned_count = 0;
+        let batch_size = self.scanner_cfg.cleanup_batch_size;
+
+        for block_num in (min_block..max_block).step_by(batch_size) {
+            let batch_end = std::cmp::min(block_num + batch_size as u64, max_block);
+            let mut keys_to_delete = Vec::new();
+
+            for block_number in block_num..batch_end {
+                let key = keys::block_index_active_key(&self.scanner_cfg.chain_name, block_number);
+                keys_to_delete.push(key.into_bytes());
+            }
+
+            if !keys_to_delete.is_empty() {
+                self.storage.delete_batch(&keys_to_delete)?;
+                cleaned_count += keys_to_delete.len();
+            }
+        }
+
+        debug!("🗑️ Cleaned {} expired active indexes", cleaned_count);
         Ok(cleaned_count)
+    }
+
+    /// Clean up expired history indexes
+    async fn cleanup_expired_history_indexes(
+        &self,
+        min_block: u64,
+        max_block: u64,
+    ) -> Result<usize> {
+        let mut cleaned_count = 0;
+        let prefix = format!(
+            "{}:{}:",
+            self.scanner_cfg.chain_name,
+            keys::BLOCK_INDEX_HISTORY_PREFIX
+        );
+
+        let results = self.storage.scan_prefix(&prefix, None)?;
+        let mut keys_to_delete = Vec::new();
+
+        for (key, _) in results {
+            // Parse key to get block number
+            if let Some(block_number) = self.extract_block_number_from_history_key(&key)
+                && block_number >= min_block
+                && block_number < max_block
+            {
+                keys_to_delete.push(key.into_bytes());
+            }
+        }
+
+        if !keys_to_delete.is_empty() {
+            self.storage.delete_batch(&keys_to_delete)?;
+            cleaned_count = keys_to_delete.len();
+        }
+
+        debug!("🗑️ Cleaned {} expired history indexes", cleaned_count);
+        Ok(cleaned_count)
+    }
+
+    /// Clean up orphaned block data
+    async fn cleanup_orphaned_block_data(&self) -> Result<usize> {
+        let mut cleaned_count = 0;
+        let block_data_prefix = format!(
+            "{}:{}:",
+            self.scanner_cfg.chain_name,
+            keys::BLOCK_DATA_PREFIX
+        );
+
+        // Get all block data
+        let block_data_results = self.storage.scan_prefix(&block_data_prefix, None)?;
+        let mut keys_to_delete = Vec::new();
+
+        // Build active hash set for quick lookup
+        let active_hashes = self.build_active_hash_set().await?;
+
+        for (key, _) in block_data_results {
+            // Extract block hash from key
+            if let Some(block_hash) = self.extract_block_hash_from_data_key(&key) {
+                // Check if block hash is referenced by active index
+                if !active_hashes.contains(&block_hash) {
+                    keys_to_delete.push(key.into_bytes());
+
+                    // Also delete corresponding receipts
+                    let receipts_key =
+                        keys::block_receipts_key(&self.scanner_cfg.chain_name, &block_hash);
+                    keys_to_delete.push(receipts_key.into_bytes());
+                }
+            }
+        }
+
+        if !keys_to_delete.is_empty() {
+            self.storage.delete_batch(&keys_to_delete)?;
+            cleaned_count = keys_to_delete.len() / 2; // Each block has 2 keys (data + receipts)
+        }
+
+        debug!("🗑️ Cleaned {} orphaned block data entries", cleaned_count);
+        Ok(cleaned_count)
+    }
+
+    /// Build active hash set for quick lookup
+    async fn build_active_hash_set(&self) -> Result<HashSet<String>> {
+        let mut active_hashes = HashSet::new();
+        let active_prefix = format!(
+            "{}:{}:",
+            self.scanner_cfg.chain_name,
+            keys::BLOCK_INDEX_ACTIVE_PREFIX
+        );
+        let results = self.storage.scan_prefix(&active_prefix, None)?;
+
+        for (_, value) in results {
+            if let Ok(index) = serde_json::from_str::<BlockIndex>(&value) {
+                active_hashes.insert(index.block_hash);
+            }
+        }
+
+        Ok(active_hashes)
+    }
+
+    /// Extract block number from history key
+    fn extract_block_number_from_history_key(&self, key: &str) -> Option<u64> {
+        let parts: Vec<&str> = key.split(':').collect();
+        if parts.len() >= 3 {
+            parts[2].parse::<u64>().ok()
+        } else {
+            None
+        }
+    }
+
+    /// Extract block hash from data key
+    fn extract_block_hash_from_data_key(&self, key: &str) -> Option<String> {
+        let parts: Vec<&str> = key.split(':').collect();
+        if parts.len() >= 3 {
+            Some(parts[2].to_string())
+        } else {
+            None
+        }
     }
 }
 
@@ -146,7 +265,7 @@ impl Cleaner for EvmCleaner {
 mod tests {
     use super::*;
     use crate::{
-        core::types::{BlockData, ScannerProgress},
+        core::table::{BlockData, BlockIndex, ScannerProgress},
         storage::schema::keys,
     };
     use chrono::Utc;
@@ -199,7 +318,7 @@ mod tests {
         }
     }
 
-    // Helper to store mock blocks in storage
+    // Helper to store mock blocks in storage with active indexes
     fn store_mock_blocks(
         storage: &RocksDBStorage,
         chain_name: &str,
@@ -208,11 +327,21 @@ mod tests {
     ) -> Result<()> {
         for block_num in start..end {
             let block_data = create_mock_block_data(block_num);
-            let block_data_key = keys::block_data_key(chain_name, block_num);
-            let block_receipts_key = keys::block_receipts_key(chain_name, block_num);
+            let block_data_key = keys::block_data_key(chain_name, &block_data.hash);
+            let block_receipts_key = keys::block_receipts_key(chain_name, &block_data.hash);
 
+            // Store block data
             storage.write_json(&block_data_key, &block_data)?;
             storage.write(&block_receipts_key, &block_data.block_receipts_json)?;
+
+            // Create and store active index
+            let active_index = BlockIndex {
+                block_hash: block_data.hash.clone(),
+                parent_hash: format!("0xparent{}", block_num - 1),
+                created_at: Utc::now(),
+            };
+            let active_key = keys::block_index_active_key(chain_name, block_num);
+            storage.write_json(&active_key, &active_index)?;
         }
         Ok(())
     }
@@ -314,12 +443,17 @@ mod tests {
         let cleaner = EvmCleaner::new(config, storage.clone());
 
         // Cleanup should remove blocks 100-109 (keep latest 10)
+        // Now we clean: active indexes (10) + orphaned data (10) = 20 total
         let result = cleaner.cleanup().await?;
-        assert_eq!(result, 10, "Should attempt to clean 10 blocks");
+        assert_eq!(
+            result, 20,
+            "Should attempt to clean 20 items (10 active indexes + 10 orphaned data)"
+        );
 
-        // Verify blocks 100-109 are deleted
+        // Verify blocks 100-109 are deleted (check by hash)
         for block_num in 100..110 {
-            let key = keys::block_data_key(TEST_CHAIN_NAME, block_num);
+            let block_data = create_mock_block_data(block_num);
+            let key = keys::block_data_key(TEST_CHAIN_NAME, &block_data.hash);
             assert!(
                 !storage.exists(&key)?,
                 "Block {} should be deleted",
@@ -327,9 +461,10 @@ mod tests {
             );
         }
 
-        // Verify blocks 110-119 still exist
+        // Verify blocks 110-119 still exist (check by hash)
         for block_num in 110..120 {
-            let key = keys::block_data_key(TEST_CHAIN_NAME, block_num);
+            let block_data = create_mock_block_data(block_num);
+            let key = keys::block_data_key(TEST_CHAIN_NAME, &block_data.hash);
             assert!(
                 storage.exists(&key)?,
                 "Block {} should still exist",
@@ -365,12 +500,17 @@ mod tests {
         let cleaner = EvmCleaner::new(config, storage.clone());
 
         // Cleanup should remove blocks 100-239 (keep latest 10: 240-249)
+        // Now we clean: active indexes (140) + orphaned data (140) = 280 total
         let result = cleaner.cleanup().await?;
-        assert_eq!(result, 140, "Should attempt to clean 140 blocks");
+        assert_eq!(
+            result, 280,
+            "Should attempt to clean 280 items (140 active indexes + 140 orphaned data)"
+        );
 
-        // Verify old blocks are deleted
+        // Verify old blocks are deleted (check by hash)
         for block_num in 100..240 {
-            let key = keys::block_data_key(TEST_CHAIN_NAME, block_num);
+            let block_data = create_mock_block_data(block_num);
+            let key = keys::block_data_key(TEST_CHAIN_NAME, &block_data.hash);
             assert!(
                 !storage.exists(&key)?,
                 "Block {} should be deleted",
@@ -378,9 +518,10 @@ mod tests {
             );
         }
 
-        // Verify recent blocks still exist
+        // Verify recent blocks still exist (check by hash)
         for block_num in 240..250 {
-            let key = keys::block_data_key(TEST_CHAIN_NAME, block_num);
+            let block_data = create_mock_block_data(block_num);
+            let key = keys::block_data_key(TEST_CHAIN_NAME, &block_data.hash);
             assert!(
                 storage.exists(&key)?,
                 "Block {} should still exist",

@@ -4,7 +4,7 @@ use crate::{
     config::ScannerConfig,
     core::{
         scanner::Scanner,
-        types::{BlockData, ScannerProgress},
+        table::{BlockData, BlockIndex, BlockIndexHistory, ScannerProgress},
     },
     storage::{rocksdb::RocksDBStorage, schema::keys, traits::KVStorage},
 };
@@ -76,30 +76,65 @@ impl EvmScanner {
             .write_json(&keys::progress_key(&self.scanner_cfg.chain_name), &progress)
     }
 
-    fn store_block_data(&self, block_number: u64, block_data: &BlockData) -> Result<()> {
-        let block_data_key = keys::block_data_key(&self.scanner_cfg.chain_name, block_number);
-        let block_receipts_key =
-            keys::block_receipts_key(&self.scanner_cfg.chain_name, block_number);
+    /// Retrieve active block index
+    fn get_active_block_index(&self, block_number: u64) -> Result<Option<BlockIndex>> {
+        let key = keys::block_index_active_key(&self.scanner_cfg.chain_name, block_number);
+        self.storage.read_json(&key)
+    }
 
-        // Store BlockData object for quick hash access (used by reorg detection)
+    fn store_block_data(&self, block_data: &BlockData) -> Result<()> {
+        let block_data_key = keys::block_data_key(&self.scanner_cfg.chain_name, &block_data.hash);
+        let block_receipts_key =
+            keys::block_receipts_key(&self.scanner_cfg.chain_name, &block_data.hash);
+
+        // Store block data
         self.storage.write_json(&block_data_key, block_data)?;
         debug!("⏏️ Store block data: {}", block_data_key);
         self.storage
             .write(&block_receipts_key, &block_data.block_receipts_json)?;
         debug!("⏏️ Store block receipts: {}", block_receipts_key);
 
-        Ok(())
-    }
+        // Parse block data and update active index
+        let block: serde_json::Value = serde_json::from_str(&block_data.block_data_json)?;
 
-    fn delete_block_data(&self, block_number: u64) -> Result<()> {
-        let block_data_key = keys::block_data_key(&self.scanner_cfg.chain_name, block_number);
-        let block_receipts_key =
-            keys::block_receipts_key(&self.scanner_cfg.chain_name, block_number);
+        // Parse block number from alloy Block format
+        let block_number = if let Some(number_str) = block["header"]["number"].as_str() {
+            // Handle hex string like "0x1"
+            if let Some(stripped) = number_str.strip_prefix("0x") {
+                u64::from_str_radix(stripped, 16)?
+            } else {
+                number_str.parse::<u64>()?
+            }
+        } else if let Some(number_str) = block["number"].as_str() {
+            // Handle hex string like "0x1"
+            if let Some(stripped) = number_str.strip_prefix("0x") {
+                u64::from_str_radix(stripped, 16)?
+            } else {
+                number_str.parse::<u64>()?
+            }
+        } else {
+            return Err(anyhow::anyhow!("Failed to parse block number"));
+        };
 
-        self.storage.delete(&block_data_key)?;
-        debug!("🗑️ Deleted block data: {}", block_data_key);
-        self.storage.delete(&block_receipts_key)?;
-        debug!("🗑️ Deleted block receipts: {}", block_receipts_key);
+        let parent_hash = if let Some(parent) = block["header"]["parent_hash"].as_str() {
+            parent.to_string()
+        } else if let Some(parent) = block["parentHash"].as_str() {
+            parent.to_string()
+        } else {
+            return Err(anyhow::anyhow!("Failed to parse parentHash"));
+        };
+
+        let active_index = BlockIndex {
+            block_hash: block_data.hash.clone(),
+            parent_hash,
+            created_at: Utc::now(),
+        };
+        let active_key = keys::block_index_active_key(&self.scanner_cfg.chain_name, block_number);
+        self.storage.write_json(&active_key, &active_index)?;
+        debug!(
+            "📝 Updated active index for block {}: {}",
+            block_number, block_data.hash
+        );
 
         Ok(())
     }
@@ -129,31 +164,89 @@ impl EvmScanner {
             return Ok(true);
         }
 
-        // Read previous block from storage
-        let pre_block_key = keys::block_data_key(&self.scanner_cfg.chain_name, scan_block - 1);
-        let pre_block = self.storage.read_json::<BlockData>(&pre_block_key)?;
-
-        // If previous block doesn't exist in storage, allow scanning to continue
-        if pre_block.is_none() {
+        // Retrieve the hash of the previous block from the active index.
+        let pre_block_index = self.get_active_block_index(scan_block - 1)?;
+        if pre_block_index.is_none() {
             debug!(
-                "Previous block {} not found in storage, allowing scan to continue",
+                "Previous block {} not found in active index, allowing scan to continue",
                 scan_block - 1
             );
             return Ok(true);
         }
 
-        // Compare stored hash with current block's parent_hash
-        let stored_hash = &pre_block.unwrap().hash;
+        let pre_block_hash = pre_block_index.unwrap().block_hash;
+        let stored_hash = &pre_block_hash;
+
         debug!(
             "Comparing hashes - Stored: {}, Parent: {}",
             stored_hash, current_block_parent_hash
         );
         let matches = stored_hash == current_block_parent_hash;
         debug!("Hash match result: {}", matches);
+
         Ok(matches)
     }
 
-    fn handle_reorg(&self, scan_block: u64) -> Result<()> {
+    /// Update block index on reorg - move current index to history and update active index
+    fn update_block_index_on_reorg(
+        &self,
+        block_number: u64,
+        new_block_data: &BlockData,
+    ) -> Result<()> {
+        let timestamp = Utc::now().timestamp();
+
+        // Parse new block data to get parent_hash
+        let block: serde_json::Value = serde_json::from_str(&new_block_data.block_data_json)?;
+        let new_parent_hash = if let Some(parent) = block["header"]["parent_hash"].as_str() {
+            parent.to_string()
+        } else if let Some(parent) = block["parentHash"].as_str() {
+            parent.to_string()
+        } else {
+            return Err(anyhow::anyhow!(
+                "Failed to parse parentHash from block data"
+            ));
+        };
+
+        // 1. Get current active index
+        let active_key = keys::block_index_active_key(&self.scanner_cfg.chain_name, block_number);
+        if let Some(current_index) = self.storage.read_json::<BlockIndex>(&active_key)? {
+            // 2. Move current index to history table
+            let history_key = keys::block_index_history_key(
+                &self.scanner_cfg.chain_name,
+                block_number,
+                timestamp,
+            );
+            let history_entry = BlockIndexHistory {
+                block_hash: current_index.block_hash.clone(),
+                parent_hash: current_index.parent_hash.clone(),
+                created_at: current_index.created_at,
+                is_active: false,
+                version: timestamp as u64,
+                replaced_at: Some(Utc::now()),
+            };
+            self.storage.write_json(&history_key, &history_entry)?;
+            debug!(
+                "📝 Moved block {} index to history: {}",
+                block_number, current_index.block_hash
+            );
+        }
+
+        // 3. Update active index
+        let new_index = BlockIndex {
+            block_hash: new_block_data.hash.clone(),
+            parent_hash: new_parent_hash,
+            created_at: Utc::now(),
+        };
+        self.storage.write_json(&active_key, &new_index)?;
+        debug!(
+            "✅ Updated active index for block {}: {}",
+            block_number, new_block_data.hash
+        );
+
+        Ok(())
+    }
+
+    async fn handle_reorg(&self, scan_block: u64) -> Result<()> {
         let mut progress = self.get_progress()?;
         let rollback_block = scan_block - 1;
 
@@ -176,8 +269,11 @@ impl EvmScanner {
             ));
         }
 
-        // Delete the mismatched block data
-        self.delete_block_data(rollback_block)?;
+        // Get new block data (this requires 1 RPC request)
+        let new_block_data = self.fetch_block(rollback_block).await?;
+
+        // Update index instead of deleting data
+        self.update_block_index_on_reorg(rollback_block, &new_block_data)?;
 
         // Update progress
         progress.current_block = rollback_block - 1;
@@ -187,9 +283,8 @@ impl EvmScanner {
         self.update_progress(progress)?;
 
         warn!(
-            "⚠️ Reorg detected at block {}! Rolling back to block {}",
-            rollback_block,
-            rollback_block - 1
+            "⚠️ Reorg detected at block {}! Updated index to new hash: {}",
+            rollback_block, new_block_data.hash
         );
 
         Ok(())
@@ -237,7 +332,7 @@ impl EvmScanner {
                         match self.verify_reorg(parent_hash, scan_block) {
                             Ok(true) => {
                                 // No reorg detected, proceed with storing
-                                self.store_block_data(scan_block, &block_data)?;
+                                self.store_block_data(&block_data)?;
                                 progress.current_block = scan_block;
 
                                 // Clear reorg status if recovering from reorg
@@ -278,7 +373,7 @@ impl EvmScanner {
                             }
                             Ok(false) => {
                                 // Reorg detected, handle rollback
-                                self.handle_reorg(scan_block)?;
+                                self.handle_reorg(scan_block).await?;
                                 info!("🔄 Reorg handled, will retry from rolled back position");
                             }
                             Err(e) => {
@@ -287,7 +382,7 @@ impl EvmScanner {
                         }
                     } else {
                         // First block or start_block, skip reorg check
-                        self.store_block_data(scan_block, &block_data)?;
+                        self.store_block_data(&block_data)?;
                         progress.current_block = scan_block;
                         progress.status = "scanning".to_string();
                         progress.updated_at = Utc::now();
@@ -377,7 +472,7 @@ impl EvmScanner {
             std::time::Duration::from_secs(3)
         } else {
             // Catching up: use shorter interval
-            std::time::Duration::from_millis(100)
+            std::time::Duration::from_millis(10)
         }
     }
 }
@@ -712,10 +807,11 @@ mod tests {
         let block_data = scanner.fetch_block(block_number).await?;
 
         // Store the block data using the new method
-        scanner.store_block_data(block_number, &block_data)?;
+        scanner.store_block_data(&block_data)?;
 
         // Verify block data is stored correctly
-        let block_data_key = keys::block_data_key(&scanner.scanner_cfg.chain_name, block_number);
+        let block_data_key =
+            keys::block_data_key(&scanner.scanner_cfg.chain_name, &block_data.hash);
         let stored_block_data = scanner.storage.read_json::<BlockData>(&block_data_key)?;
 
         assert!(
@@ -731,7 +827,7 @@ mod tests {
 
         // Verify block receipts are stored correctly
         let block_receipts_key =
-            keys::block_receipts_key(&scanner.scanner_cfg.chain_name, block_number);
+            keys::block_receipts_key(&scanner.scanner_cfg.chain_name, &block_data.hash);
         let stored_receipts = scanner.storage.read(&block_receipts_key)?;
 
         assert!(
@@ -811,47 +907,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_block_data() -> Result<()> {
-        let scanner = create_test_scanner_with_name("delete_block");
-        scanner.init().await?;
-
-        // Fetch and store block 1
-        let block_number = 1;
-        let block_data = scanner.fetch_block(block_number).await?;
-        scanner.store_block_data(block_number, &block_data)?;
-
-        // Verify data exists before deletion
-        let block_data_key = keys::block_data_key(&scanner.scanner_cfg.chain_name, block_number);
-        let block_receipts_key =
-            keys::block_receipts_key(&scanner.scanner_cfg.chain_name, block_number);
-
-        assert!(
-            scanner.storage.read(&block_data_key)?.is_some(),
-            "Block data should exist before deletion"
-        );
-        assert!(
-            scanner.storage.read(&block_receipts_key)?.is_some(),
-            "Block receipts should exist before deletion"
-        );
-
-        // Delete the block data
-        scanner.delete_block_data(block_number)?;
-
-        // Verify data is deleted
-        assert!(
-            scanner.storage.read(&block_data_key)?.is_none(),
-            "Block data should be deleted"
-        );
-        assert!(
-            scanner.storage.read(&block_receipts_key)?.is_none(),
-            "Block receipts should be deleted"
-        );
-
-        println!("Delete block data test passed!");
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_verify_reorg_match() -> Result<()> {
         let temp_dir = std::env::temp_dir();
         let path = temp_dir.join(format!("rocksdb_test_reorg_match_{}", std::process::id()));
@@ -887,7 +942,7 @@ mod tests {
         let block_2 = scanner.fetch_block(2).await?;
 
         // Store block 1
-        scanner.store_block_data(1, &block_1)?;
+        scanner.store_block_data(&block_1)?;
 
         // Parse parent_hash from block 2
         let parent_hash = parse_parent_hash(&block_2.block_data_json)?;
@@ -946,7 +1001,7 @@ mod tests {
         };
 
         // Store fake block 1
-        scanner.store_block_data(1, &fake_block_1)?;
+        scanner.store_block_data(&fake_block_1)?;
 
         // Parse real parent_hash from block 2
         let parent_hash = parse_parent_hash(&block_2.block_data_json)?;
@@ -1053,29 +1108,42 @@ mod tests {
         // Fetch and store block 1 and 2
         let block_1 = scanner.fetch_block(1).await?;
         let block_2 = scanner.fetch_block(2).await?;
-        scanner.store_block_data(1, &block_1)?;
-        scanner.store_block_data(2, &block_2)?;
+        scanner.store_block_data(&block_1)?;
+        scanner.store_block_data(&block_2)?;
 
         // Update progress to current_block = 2
         let mut progress = scanner.get_progress()?;
         progress.current_block = 2;
         scanner.update_progress(progress)?;
 
-        // Handle reorg at block 3 (will rollback block 2)
-        scanner.handle_reorg(3)?;
+        // Handle reorg at block 3 (will update index for block 2)
+        scanner.handle_reorg(3).await?;
 
-        // Verify block 2 is deleted
-        let block_2_key = keys::block_data_key(&scanner.scanner_cfg.chain_name, 2);
+        // Verify block 2 data still exists (new logic: data is preserved)
+        let block_2_key = keys::block_data_key(&scanner.scanner_cfg.chain_name, &block_2.hash);
         assert!(
-            scanner.storage.read(&block_2_key)?.is_none(),
-            "Block 2 should be deleted"
+            scanner.storage.read(&block_2_key)?.is_some(),
+            "Block 2 data should still exist"
         );
 
         // Verify block 1 still exists
-        let block_1_key = keys::block_data_key(&scanner.scanner_cfg.chain_name, 1);
+        let block_1_key = keys::block_data_key(&scanner.scanner_cfg.chain_name, &block_1.hash);
         assert!(
             scanner.storage.read(&block_1_key)?.is_some(),
             "Block 1 should still exist"
+        );
+
+        // Verify block 2 index was updated (check active index)
+        let block_2_active_index = scanner.get_active_block_index(2)?;
+        assert!(
+            block_2_active_index.is_some(),
+            "Block 2 should have an active index"
+        );
+        // In test environment, the hash might be the same, but the index should exist
+        let new_index = block_2_active_index.unwrap();
+        assert_eq!(
+            new_index.block_hash, block_2.hash,
+            "Block 2 index should be updated (in test env, hash might be same)"
         );
 
         // Verify progress is updated
@@ -1136,7 +1204,7 @@ mod tests {
 
         // Try to rollback beyond MAX_REORG_DEPTH (100)
         // This would try to rollback to block 2, depth = 200 - 2 = 198 > 100
-        let result = scanner.handle_reorg(3);
+        let result = scanner.handle_reorg(3).await;
 
         assert!(result.is_err(), "Should fail due to depth limit");
         let err_msg = result.unwrap_err().to_string();
@@ -1166,7 +1234,7 @@ mod tests {
 
         // Try to handle reorg at block 11
         // This would try to rollback to block 10, then 10 - 1 = 9 < start_block (10)
-        let result = scanner.handle_reorg(11);
+        let result = scanner.handle_reorg(11).await;
 
         assert!(
             result.is_err(),

@@ -1,4 +1,4 @@
-use crate::core::types::BlockData;
+use crate::core::table::BlockData;
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::broadcast;
