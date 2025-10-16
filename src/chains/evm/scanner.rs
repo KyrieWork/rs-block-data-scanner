@@ -169,55 +169,51 @@ impl EvmScanner {
         // debug_traceBlockByHash requires tracer options to specify the tracer type
         // Using "callTracer" to get the call tree format that matches our structure
         let tracer_options = serde_json::json!({
-            "tracer": "callTracer",
-            "tracerConfig": {
-                "withLog": false
-            }
+            "tracer": "callTracer"
         });
 
         debug!("🖨️ Fetching debug trace block for block {}", block_hash);
 
         // Try to get debug trace data, but handle cases where the method is not supported
-        match timeout(
-            Duration::from_secs(60),
-            self.provider.client().request::<_, serde_json::Value>(
-                "debug_traceBlockByHash",
-                (block_hash, tracer_options),
-            ),
-        )
-        .await
+        // Use raw_request_dyn to get raw JSON response without deserialization to avoid recursion limit
+        let params = serde_json::value::to_raw_value(&(block_hash, tracer_options))
+            .map_err(|e| anyhow::anyhow!("Failed to serialize request parameters: {}", e))?;
+
+        match self
+            .provider
+            .raw_request_dyn("debug_traceBlockByHash".into(), &params)
+            .await
         {
-            Ok(Ok(raw_response)) => {
-                // Convert the response directly to JSON string without deserialization
-                let debug_trace_json = serde_json::to_string(&raw_response).map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to convert debug trace response to JSON string: {}",
-                        e
-                    )
-                })?;
+            Ok(raw_response) => {
+                // Get the raw JSON string directly without any deserialization
+                let debug_trace_json = raw_response.get();
 
                 debug!(
                     "🖨️ Debug trace block JSON length: {} characters",
                     debug_trace_json.len()
                 );
 
-                Ok(debug_trace_json)
+                Ok(debug_trace_json.to_string())
             }
-            Ok(Err(e)) => {
-                // Check if the error is "Method not found" (common in test environments like Anvil)
+            Err(e) => {
+                // Check for various error conditions and handle gracefully
                 let error_msg = e.to_string();
                 if error_msg.contains("-32601") || error_msg.contains("Method not found") {
                     warn!(
                         "⚠️ debug_traceBlockByHash not supported by this node, using empty trace data"
                     );
                     Ok("[]".to_string()) // Return empty array as fallback
+                } else if error_msg.contains("-32000")
+                    || error_msg.contains("required historical state unavailable")
+                {
+                    warn!(
+                        "⚠️ Historical state unavailable for debug_traceBlockByHash, using empty trace data"
+                    );
+                    Ok("[]".to_string()) // Return empty array as fallback
                 } else {
                     Err(anyhow::anyhow!("debug_traceBlockByHash failed: {}", e))
                 }
             }
-            Err(_) => Err(anyhow::anyhow!(
-                "debug_traceBlockByHash timeout after 60 seconds"
-            )),
         }
     }
 
