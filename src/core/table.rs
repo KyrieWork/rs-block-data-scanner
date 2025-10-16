@@ -61,4 +61,5 @@ pub struct BlockData {
     pub hash: String,
     pub block_data_json: String,
     pub block_receipts_json: String,
+    pub trace_logs_json: String,
 }

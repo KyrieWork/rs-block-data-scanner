@@ -5,6 +5,7 @@ use crate::{
     core::{
         scanner::Scanner,
         table::{BlockData, BlockIndex, BlockIndexHistory, ScannerProgress},
+        types::EvmBlockTraceLogs,
     },
     storage::{rocksdb::RocksDBStorage, schema::keys, traits::KVStorage},
 };
@@ -86,13 +87,21 @@ impl EvmScanner {
         let block_data_key = keys::block_data_key(&self.scanner_cfg.chain_name, &block_data.hash);
         let block_receipts_key =
             keys::block_receipts_key(&self.scanner_cfg.chain_name, &block_data.hash);
+        let block_trace_logs_key =
+            keys::block_trace_logs_key(&self.scanner_cfg.chain_name, &block_data.hash);
 
         // Store block data
         self.storage.write_json(&block_data_key, block_data)?;
+        // debug!("🖨️ block_data_json: {:?}", block_data.block_data_json);
         debug!("⏏️ Store block data: {}", block_data_key);
         self.storage
             .write(&block_receipts_key, &block_data.block_receipts_json)?;
+        // debug!("🖨️ block_receipts_json: {:?}", block_data.block_receipts_json);
         debug!("⏏️ Store block receipts: {}", block_receipts_key);
+        self.storage
+            .write(&block_trace_logs_key, &block_data.trace_logs_json)?;
+        // debug!("🖨️ trace_logs_json: {:?}", block_data.trace_logs_json);
+        debug!("⏏️ Store block trace logs: {}", block_trace_logs_key);
 
         // Parse block data and update active index
         let block: serde_json::Value = serde_json::from_str(&block_data.block_data_json)?;
@@ -152,6 +161,15 @@ impl EvmScanner {
         let target_block = safe_target.max(progress.current_block);
 
         Ok((target_block, latest_block))
+    }
+
+    async fn fetch_trace_logs(&self, block_number: u64) -> Result<Vec<EvmBlockTraceLogs>> {
+        let trace_logs_data = self
+            .provider
+            .client()
+            .request::<_, Vec<EvmBlockTraceLogs>>("trace_block", (block_number,))
+            .await?;
+        Ok(trace_logs_data)
     }
 
     fn verify_reorg(&self, current_block_parent_hash: &str, scan_block: u64) -> Result<bool> {
@@ -531,11 +549,14 @@ impl Scanner for EvmScanner {
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block {} not found", block_number))?;
 
+        let trace_logs = self.fetch_trace_logs(block_number).await?;
+
         debug!(
-            "🔍 Fetched Block {} Tx {} Receipts: {:?}",
+            "🔍 Fetched Block {} Tx {} Receipts: {:?}, Trace: {:?}",
             block_number,
             block.transactions.len(),
-            receipts.len()
+            receipts.len(),
+            trace_logs.len()
         );
 
         // verify block and receipts is match
@@ -547,6 +568,7 @@ impl Scanner for EvmScanner {
             hash: format!("{:?}", block.header.hash),
             block_data_json: serde_json::to_string(&block)?,
             block_receipts_json: serde_json::to_string(&receipts)?,
+            trace_logs_json: serde_json::to_string(&trace_logs)?,
         })
     }
 
@@ -841,6 +863,21 @@ mod tests {
             "Stored receipts should match original"
         );
 
+        // Verify block trace logs are stored correctly
+        let block_trace_logs_key =
+            keys::block_trace_logs_key(&scanner.scanner_cfg.chain_name, &block_data.hash);
+        let stored_trace_logs = scanner.storage.read(&block_trace_logs_key)?;
+
+        assert!(
+            stored_trace_logs.is_some(),
+            "Block trace logs should be stored in RocksDB"
+        );
+        assert_eq!(
+            stored_trace_logs.unwrap(),
+            block_data.trace_logs_json,
+            "Stored trace logs should match original"
+        );
+
         println!(
             "Store block data test passed! Block: {}, Hash: {}",
             block_number, block_data.hash
@@ -1001,6 +1038,7 @@ mod tests {
             hash: "0xfake_hash_that_does_not_match".to_string(),
             block_data_json: block_1.block_data_json.clone(),
             block_receipts_json: block_1.block_receipts_json.clone(),
+            trace_logs_json: "[]".to_string(),
         };
 
         // Store fake block 1

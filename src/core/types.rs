@@ -67,3 +67,44 @@ pub struct EvmBlockReceipts {
     #[serde(rename = "type")]
     pub type_field: String,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EvmBlockTraceLogs {
+    pub action: EvmBlockTraceAction,
+    #[serde(rename = "blockHash")]
+    pub block_hash: String,
+    #[serde(rename = "blockNumber")]
+    pub block_number: i64,
+    pub result: Option<EvmBlockTraceResult>,
+    pub subtraces: i32,
+    #[serde(rename = "traceAddress")]
+    pub trace_address: Vec<i32>,
+    #[serde(rename = "transactionHash")]
+    pub transaction_hash: String,
+    #[serde(rename = "transactionPosition")]
+    pub transaction_position: i32,
+    #[serde(rename = "type")]
+    pub type_field: String,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EvmBlockTraceAction {
+    #[serde(rename = "callType")]
+    pub call_type: Option<String>,
+    pub from: Option<String>,
+    pub gas: Option<String>,
+    pub input: Option<String>,
+    pub to: Option<String>,
+    pub value: Option<String>,
+    pub init: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EvmBlockTraceResult {
+    #[serde(rename = "gasUsed")]
+    pub gas_used: Option<String>,
+    pub output: Option<String>,
+    pub address: Option<String>,
+    pub code: Option<String>,
+}

@@ -185,8 +185,11 @@ impl EvmCleaner {
         for hash in &hashes_to_clean {
             let block_data_key = keys::block_data_key(&self.scanner_cfg.chain_name, hash);
             let block_receipts_key = keys::block_receipts_key(&self.scanner_cfg.chain_name, hash);
+            let block_trace_logs_key =
+                keys::block_trace_logs_key(&self.scanner_cfg.chain_name, hash);
             data_keys_to_delete.push(block_data_key.into_bytes());
             data_keys_to_delete.push(block_receipts_key.into_bytes());
+            data_keys_to_delete.push(block_trace_logs_key.into_bytes());
         }
 
         // Step 4: Delete indexes first
@@ -195,10 +198,10 @@ impl EvmCleaner {
             cleaned_count += index_keys_to_delete.len();
         }
 
-        // Step 5: Delete block data and receipts
+        // Step 5: Delete block data, receipts, and trace logs
         if !data_keys_to_delete.is_empty() {
             self.storage.delete_batch(&data_keys_to_delete)?;
-            cleaned_count += hashes_to_clean.len(); // Count actual blocks cleaned
+            cleaned_count += data_keys_to_delete.len(); // Count all data keys deleted
         }
 
         Ok(cleaned_count)
@@ -231,13 +234,18 @@ impl EvmCleaner {
                     let receipts_key =
                         keys::block_receipts_key(&self.scanner_cfg.chain_name, &block_hash);
                     keys_to_delete.push(receipts_key.into_bytes());
+
+                    // Also delete corresponding trace logs
+                    let trace_logs_key =
+                        keys::block_trace_logs_key(&self.scanner_cfg.chain_name, &block_hash);
+                    keys_to_delete.push(trace_logs_key.into_bytes());
                 }
             }
         }
 
         if !keys_to_delete.is_empty() {
             self.storage.delete_batch(&keys_to_delete)?;
-            cleaned_count = keys_to_delete.len() / 2; // Each block has 2 keys (data + receipts)
+            cleaned_count = keys_to_delete.len(); // Count all keys deleted (data + receipts + trace_logs)
         }
 
         debug!("🗑️ Cleaned {} orphaned block data entries", cleaned_count);
@@ -394,6 +402,7 @@ mod tests {
             hash: format!("0xhash{}", block_num),
             block_data_json: format!(r#"{{"header":{{"number":"0x{:x}}}"}}"#, block_num),
             block_receipts_json: "[]".to_string(),
+            trace_logs_json: "[]".to_string(),
         }
     }
 
@@ -408,11 +417,11 @@ mod tests {
             let block_data = create_mock_block_data(block_num);
             let block_data_key = keys::block_data_key(chain_name, &block_data.hash);
             let block_receipts_key = keys::block_receipts_key(chain_name, &block_data.hash);
-
+            let block_trace_logs_key = keys::block_trace_logs_key(chain_name, &block_data.hash);
             // Store block data
             storage.write_json(&block_data_key, &block_data)?;
             storage.write(&block_receipts_key, &block_data.block_receipts_json)?;
-
+            storage.write(&block_trace_logs_key, &block_data.trace_logs_json)?;
             // Create and store active index
             let active_index = BlockIndex {
                 block_hash: block_data.hash.clone(),
@@ -522,11 +531,11 @@ mod tests {
         let cleaner = EvmCleaner::new(config, storage.clone());
 
         // Cleanup should remove blocks 100-109 (keep latest 10)
-        // New logic: expired blocks (10 active indexes + 10 block data) + orphaned data (0) = 20 total
+        // New logic: expired blocks (10 active indexes + 30 data items: 10 block_data + 10 receipts + 10 trace_logs) + orphaned data (0) = 40 total
         let result = cleaner.cleanup().await?;
         assert_eq!(
-            result, 20,
-            "Should attempt to clean 20 items (10 expired blocks: 10 indexes + 10 data)"
+            result, 40,
+            "Should attempt to clean 40 items (10 expired blocks: 10 indexes + 30 data items)"
         );
 
         // Verify blocks 100-109 are deleted (check by hash)
@@ -579,11 +588,11 @@ mod tests {
         let cleaner = EvmCleaner::new(config, storage.clone());
 
         // Cleanup should remove blocks 100-239 (keep latest 10: 240-249)
-        // New logic: expired blocks (140 active indexes + 140 block data) + orphaned data (0) = 280 total
+        // New logic: expired blocks (140 active indexes + 420 data items: 140 block_data + 140 receipts + 140 trace_logs) + orphaned data (0) = 560 total
         let result = cleaner.cleanup().await?;
         assert_eq!(
-            result, 280,
-            "Should attempt to clean 280 items (140 expired blocks: 140 indexes + 140 data)"
+            result, 560,
+            "Should attempt to clean 560 items (140 expired blocks: 140 indexes + 420 data items)"
         );
 
         // Verify old blocks are deleted (check by hash)
@@ -659,8 +668,8 @@ mod tests {
         // Cleanup should only clean expired blocks, not orphaned data
         let result = cleaner.cleanup().await?;
         assert_eq!(
-            result, 20,
-            "Should clean 20 items (10 expired blocks: 10 indexes + 10 data), but no orphaned data"
+            result, 40,
+            "Should clean 40 items (10 expired blocks: 10 indexes + 30 data items), but no orphaned data"
         );
 
         println!("✅ Orphaned cleanup disabled test passed");
@@ -686,8 +695,8 @@ mod tests {
         // Cleanup should clean both expired blocks and orphaned data
         let result = cleaner.cleanup().await?;
         assert_eq!(
-            result, 20,
-            "Should clean 20 items (10 expired blocks: 10 indexes + 10 data + 0 orphaned)"
+            result, 40,
+            "Should clean 40 items (10 expired blocks: 10 indexes + 30 data items + 0 orphaned)"
         );
 
         println!("✅ Orphaned cleanup enabled test passed");
