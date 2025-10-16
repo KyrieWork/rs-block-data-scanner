@@ -185,11 +185,11 @@ impl EvmCleaner {
         for hash in &hashes_to_clean {
             let block_data_key = keys::block_data_key(&self.scanner_cfg.chain_name, hash);
             let block_receipts_key = keys::block_receipts_key(&self.scanner_cfg.chain_name, hash);
-            let block_trace_logs_key =
-                keys::block_trace_logs_key(&self.scanner_cfg.chain_name, hash);
+            let block_debug_trace_key =
+                keys::block_debug_trace_key(&self.scanner_cfg.chain_name, hash);
             data_keys_to_delete.push(block_data_key.into_bytes());
             data_keys_to_delete.push(block_receipts_key.into_bytes());
-            data_keys_to_delete.push(block_trace_logs_key.into_bytes());
+            data_keys_to_delete.push(block_debug_trace_key.into_bytes());
         }
 
         // Step 4: Delete indexes first
@@ -236,9 +236,9 @@ impl EvmCleaner {
                     keys_to_delete.push(receipts_key.into_bytes());
 
                     // Also delete corresponding trace logs
-                    let trace_logs_key =
-                        keys::block_trace_logs_key(&self.scanner_cfg.chain_name, &block_hash);
-                    keys_to_delete.push(trace_logs_key.into_bytes());
+                    let debug_trace_key =
+                        keys::block_debug_trace_key(&self.scanner_cfg.chain_name, &block_hash);
+                    keys_to_delete.push(debug_trace_key.into_bytes());
                 }
             }
         }
@@ -402,7 +402,7 @@ mod tests {
             hash: format!("0xhash{}", block_num),
             block_data_json: format!(r#"{{"header":{{"number":"0x{:x}}}"}}"#, block_num),
             block_receipts_json: "[]".to_string(),
-            trace_logs_json: "[]".to_string(),
+            debug_trace_block_json: "[]".to_string(),
         }
     }
 
@@ -417,11 +417,11 @@ mod tests {
             let block_data = create_mock_block_data(block_num);
             let block_data_key = keys::block_data_key(chain_name, &block_data.hash);
             let block_receipts_key = keys::block_receipts_key(chain_name, &block_data.hash);
-            let block_trace_logs_key = keys::block_trace_logs_key(chain_name, &block_data.hash);
+            let block_debug_trace_key = keys::block_debug_trace_key(chain_name, &block_data.hash);
             // Store block data
             storage.write_json(&block_data_key, &block_data)?;
             storage.write(&block_receipts_key, &block_data.block_receipts_json)?;
-            storage.write(&block_trace_logs_key, &block_data.trace_logs_json)?;
+            storage.write(&block_debug_trace_key, &block_data.debug_trace_block_json)?;
             // Create and store active index
             let active_index = BlockIndex {
                 block_hash: block_data.hash.clone(),

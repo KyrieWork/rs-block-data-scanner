@@ -5,7 +5,7 @@ pub mod keys {
     pub const BLOCK_INDEX_HISTORY_PREFIX: &str = "block_index_history";
     pub const BLOCK_DATA_PREFIX: &str = "block_data";
     pub const BLOCK_RECEIPTS_PREFIX: &str = "block_receipts";
-    pub const BLOCK_TRACE_LOGS_PREFIX: &str = "block_trace_logs";
+    pub const BLOCK_DEBUG_TRACE_PREFIX: &str = "block_debug_trace";
 
     // example: ethereum:progress
     pub fn progress_key(chain: &str) -> String {
@@ -35,9 +35,9 @@ pub mod keys {
         format!("{}:{}:{}", chain, BLOCK_RECEIPTS_PREFIX, block_hash)
     }
 
-    // example: ethereum:block_trace_logs:0x1234567890
-    pub fn block_trace_logs_key(chain: &str, block_hash: &str) -> String {
-        format!("{}:{}:{}", chain, BLOCK_TRACE_LOGS_PREFIX, block_hash)
+    // example: ethereum:block_debug_trace:0x1234567890
+    pub fn block_debug_trace_key(chain: &str, block_hash: &str) -> String {
+        format!("{}:{}:{}", chain, BLOCK_DEBUG_TRACE_PREFIX, block_hash)
     }
 }
 

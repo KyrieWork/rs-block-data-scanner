@@ -5,7 +5,6 @@ use crate::{
     core::{
         scanner::Scanner,
         table::{BlockData, BlockIndex, BlockIndexHistory, ScannerProgress},
-        types::EvmBlockTraceLogs,
     },
     storage::{rocksdb::RocksDBStorage, schema::keys, traits::KVStorage},
 };
@@ -87,8 +86,8 @@ impl EvmScanner {
         let block_data_key = keys::block_data_key(&self.scanner_cfg.chain_name, &block_data.hash);
         let block_receipts_key =
             keys::block_receipts_key(&self.scanner_cfg.chain_name, &block_data.hash);
-        let block_trace_logs_key =
-            keys::block_trace_logs_key(&self.scanner_cfg.chain_name, &block_data.hash);
+        let block_debug_trace_key =
+            keys::block_debug_trace_key(&self.scanner_cfg.chain_name, &block_data.hash);
 
         // Store block data
         self.storage.write_json(&block_data_key, block_data)?;
@@ -99,9 +98,12 @@ impl EvmScanner {
         // debug!("🖨️ block_receipts_json: {:?}", block_data.block_receipts_json);
         debug!("⏏️ Store block receipts: {}", block_receipts_key);
         self.storage
-            .write(&block_trace_logs_key, &block_data.trace_logs_json)?;
-        // debug!("🖨️ trace_logs_json: {:?}", block_data.trace_logs_json);
-        debug!("⏏️ Store block trace logs: {}", block_trace_logs_key);
+            .write(&block_debug_trace_key, &block_data.debug_trace_block_json)?;
+        debug!(
+            "🖨️ debug_trace_block_json: {:?}",
+            block_data.debug_trace_block_json
+        );
+        debug!("⏏️ Store block debug trace: {}", block_debug_trace_key);
 
         // Parse block data and update active index
         let block: serde_json::Value = serde_json::from_str(&block_data.block_data_json)?;
@@ -163,13 +165,60 @@ impl EvmScanner {
         Ok((target_block, latest_block))
     }
 
-    async fn fetch_trace_logs(&self, block_number: u64) -> Result<Vec<EvmBlockTraceLogs>> {
-        let trace_logs_data = self
-            .provider
-            .client()
-            .request::<_, Vec<EvmBlockTraceLogs>>("trace_block", (block_number,))
-            .await?;
-        Ok(trace_logs_data)
+    async fn fetch_debug_trace_block_by_hash(&self, block_hash: &str) -> Result<String> {
+        // debug_traceBlockByHash requires tracer options to specify the tracer type
+        // Using "callTracer" to get the call tree format that matches our structure
+        let tracer_options = serde_json::json!({
+            "tracer": "callTracer",
+            "tracerConfig": {
+                "withLog": false
+            }
+        });
+
+        debug!("🖨️ Fetching debug trace block for block {}", block_hash);
+
+        // Try to get debug trace data, but handle cases where the method is not supported
+        match timeout(
+            Duration::from_secs(60),
+            self.provider.client().request::<_, serde_json::Value>(
+                "debug_traceBlockByHash",
+                (block_hash, tracer_options),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(raw_response)) => {
+                // Convert the response directly to JSON string without deserialization
+                let debug_trace_json = serde_json::to_string(&raw_response).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to convert debug trace response to JSON string: {}",
+                        e
+                    )
+                })?;
+
+                debug!(
+                    "🖨️ Debug trace block JSON length: {} characters",
+                    debug_trace_json.len()
+                );
+
+                Ok(debug_trace_json)
+            }
+            Ok(Err(e)) => {
+                // Check if the error is "Method not found" (common in test environments like Anvil)
+                let error_msg = e.to_string();
+                if error_msg.contains("-32601") || error_msg.contains("Method not found") {
+                    warn!(
+                        "⚠️ debug_traceBlockByHash not supported by this node, using empty trace data"
+                    );
+                    Ok("[]".to_string()) // Return empty array as fallback
+                } else {
+                    Err(anyhow::anyhow!("debug_traceBlockByHash failed: {}", e))
+                }
+            }
+            Err(_) => Err(anyhow::anyhow!(
+                "debug_traceBlockByHash timeout after 60 seconds"
+            )),
+        }
     }
 
     fn verify_reorg(&self, current_block_parent_hash: &str, scan_block: u64) -> Result<bool> {
@@ -549,14 +598,15 @@ impl Scanner for EvmScanner {
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block {} not found", block_number))?;
 
-        let trace_logs = self.fetch_trace_logs(block_number).await?;
+        let debug_trace_block_json = self
+            .fetch_debug_trace_block_by_hash(&block.header.hash.to_string())
+            .await?;
 
         debug!(
-            "🔍 Fetched Block {} Tx {} Receipts: {:?}, Trace: {:?}",
+            "🔍 Fetched Block {} Tx {} Receipts: {:?}",
             block_number,
             block.transactions.len(),
-            receipts.len(),
-            trace_logs.len()
+            receipts.len()
         );
 
         // verify block and receipts is match
@@ -568,7 +618,7 @@ impl Scanner for EvmScanner {
             hash: format!("{:?}", block.header.hash),
             block_data_json: serde_json::to_string(&block)?,
             block_receipts_json: serde_json::to_string(&receipts)?,
-            trace_logs_json: serde_json::to_string(&trace_logs)?,
+            debug_trace_block_json,
         })
     }
 
@@ -864,18 +914,18 @@ mod tests {
         );
 
         // Verify block trace logs are stored correctly
-        let block_trace_logs_key =
-            keys::block_trace_logs_key(&scanner.scanner_cfg.chain_name, &block_data.hash);
-        let stored_trace_logs = scanner.storage.read(&block_trace_logs_key)?;
+        let block_debug_trace_key =
+            keys::block_debug_trace_key(&scanner.scanner_cfg.chain_name, &block_data.hash);
+        let stored_debug_trace = scanner.storage.read(&block_debug_trace_key)?;
 
         assert!(
-            stored_trace_logs.is_some(),
-            "Block trace logs should be stored in RocksDB"
+            stored_debug_trace.is_some(),
+            "Block debug trace should be stored in RocksDB"
         );
         assert_eq!(
-            stored_trace_logs.unwrap(),
-            block_data.trace_logs_json,
-            "Stored trace logs should match original"
+            stored_debug_trace.unwrap(),
+            block_data.debug_trace_block_json,
+            "Stored debug trace should match original"
         );
 
         println!(
@@ -1038,7 +1088,7 @@ mod tests {
             hash: "0xfake_hash_that_does_not_match".to_string(),
             block_data_json: block_1.block_data_json.clone(),
             block_receipts_json: block_1.block_receipts_json.clone(),
-            trace_logs_json: "[]".to_string(),
+            debug_trace_block_json: "[]".to_string(),
         };
 
         // Store fake block 1
