@@ -376,6 +376,8 @@ mod tests {
             cleanup_interval_secs: 3600,
             cleanup_batch_size: TEST_BATCH_SIZE,
             cleanup_orphaned_enabled: false, // Default disabled for tests
+            synced_interval_secs: 3,
+            catching_up_interval_millis: 10,
         }
     }
 

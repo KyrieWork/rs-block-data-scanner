@@ -66,6 +66,12 @@ pub struct ScannerConfig {
     pub cleanup_batch_size: usize,
     #[serde(default = "ScannerConfig::default_cleanup_orphaned_enabled")]
     pub cleanup_orphaned_enabled: bool,
+
+    // Scan interval configuration
+    #[serde(default = "ScannerConfig::default_synced_interval_secs")]
+    pub synced_interval_secs: u64,
+    #[serde(default = "ScannerConfig::default_catching_up_interval_millis")]
+    pub catching_up_interval_millis: u64,
 }
 
 impl ScannerConfig {
@@ -95,6 +101,12 @@ impl ScannerConfig {
     }
     fn default_cleanup_orphaned_enabled() -> bool {
         false
+    }
+    fn default_synced_interval_secs() -> u64 {
+        3 // 3 seconds when synced
+    }
+    fn default_catching_up_interval_millis() -> u64 {
+        10 // 10 milliseconds when catching up
     }
 }
 

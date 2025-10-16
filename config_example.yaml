@@ -24,6 +24,18 @@ scanner:
   timeout_secs: 15
 
   # ============================
+  # Scan interval configuration
+  # ============================
+  
+  # Scan interval when synced (seconds)
+  # Default: 3 seconds
+  synced_interval_secs: 3
+  
+  # Scan interval when catching up (milliseconds)
+  # Default: 10 milliseconds
+  catching_up_interval_millis: 10
+
+  # ============================
   # Cleanup configuration
   # ============================
   

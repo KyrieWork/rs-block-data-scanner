@@ -523,19 +523,19 @@ impl EvmScanner {
     }
 
     /// Get dynamic scan interval based on sync status
-    /// - Synced: 3 seconds
-    /// - Catching up: 500 milliseconds
+    /// - Synced: configured synced_interval_secs
+    /// - Catching up: configured catching_up_interval_millis
     fn get_scan_interval(
         &self,
         current_block: u64,
         network_latest_block: u64,
     ) -> std::time::Duration {
         if self.is_synced(current_block, network_latest_block) {
-            // Synced: use longer interval
-            std::time::Duration::from_secs(3)
+            // Synced: use configured longer interval
+            std::time::Duration::from_secs(self.scanner_cfg.synced_interval_secs)
         } else {
-            // Catching up: use shorter interval
-            std::time::Duration::from_millis(10)
+            // Catching up: use configured shorter interval
+            std::time::Duration::from_millis(self.scanner_cfg.catching_up_interval_millis)
         }
     }
 }
@@ -689,6 +689,8 @@ mod tests {
             cleanup_interval_secs: 3600,
             cleanup_batch_size: 1000,
             cleanup_orphaned_enabled: false,
+            synced_interval_secs: 3,
+            catching_up_interval_millis: 10,
         }
     }
 
@@ -1014,6 +1016,8 @@ mod tests {
                 cleanup_interval_secs: 3600,
                 cleanup_batch_size: 1000,
                 cleanup_orphaned_enabled: false,
+                synced_interval_secs: 3,
+                catching_up_interval_millis: 10,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
@@ -1067,6 +1071,8 @@ mod tests {
                 cleanup_interval_secs: 3600,
                 cleanup_batch_size: 1000,
                 cleanup_orphaned_enabled: false,
+                synced_interval_secs: 3,
+                catching_up_interval_millis: 10,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
@@ -1142,6 +1148,8 @@ mod tests {
                 cleanup_interval_secs: 3600,
                 cleanup_batch_size: 1000,
                 cleanup_orphaned_enabled: false,
+                synced_interval_secs: 3,
+                catching_up_interval_millis: 10,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
@@ -1186,6 +1194,8 @@ mod tests {
                 cleanup_interval_secs: 3600,
                 cleanup_batch_size: 1000,
                 cleanup_orphaned_enabled: false,
+                synced_interval_secs: 3,
+                catching_up_interval_millis: 10,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
@@ -1279,6 +1289,8 @@ mod tests {
                 cleanup_interval_secs: 3600,
                 cleanup_batch_size: 1000,
                 cleanup_orphaned_enabled: false,
+                synced_interval_secs: 3,
+                catching_up_interval_millis: 10,
             },
             "http://127.0.0.1:8545".to_string(),
             RocksDBStorage::new(&path_str).unwrap(),
