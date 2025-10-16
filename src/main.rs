@@ -6,7 +6,7 @@ use rs_block_data_scanner::{
     config::AppConfig,
     core::{cleaner::Cleaner, scanner::Scanner},
     storage::{rocksdb::RocksDBStorage, traits::KVStorage},
-    utils::logger::init_logger,
+    utils::{format::format_size_bytes, logger::init_logger},
 };
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
@@ -82,6 +82,23 @@ async fn main() -> Result<()> {
             let storage = RocksDBStorage::new(&storage_path)?;
             storage.init()?;
 
+            // Perform database health check
+            match storage.health_check() {
+                Ok(health) => {
+                    if health.is_healthy {
+                        info!("✅ Storage initialized and healthy");
+                    } else {
+                        warn!("⚠️ Storage initialized but health check failed");
+                        warn!("  └─ Level 0 files: {}", health.l0_files);
+                    }
+                    info!("  └─ Total keys: {}", health.num_keys);
+                    info!("  └─ SST size: {}", format_size_bytes(health.sst_size));
+                }
+                Err(e) => {
+                    warn!("⚠️ Storage health check failed: {}", e);
+                }
+            }
+
             info!("✅ Storage initialized");
             info!("  └─ Path: {}", storage_path);
             info!("  └─ Base: {}", cfg.storage.path);
@@ -128,11 +145,8 @@ async fn main() -> Result<()> {
                                     }
                                 }
 
-                                // Print database size after cleanup
-                                match storage.get_db_size() {
-                                    Ok(size) => info!("💾 Database size: {}", size),
-                                    Err(e) => debug!("Failed to get database size: {}", e),
-                                }
+                                // Print database size after cleanup (skip for now due to private field)
+                                // TODO: Add public method to get database size from cleaner
                             }
                         }
                     }
@@ -145,6 +159,12 @@ async fn main() -> Result<()> {
             info!("💡 Press Ctrl+C to stop gracefully");
 
             scanner.run(shutdown_rx).await?;
+
+            // Flush database before exit to ensure data consistency
+            match storage.flush() {
+                Ok(_) => info!("✅ Database flushed successfully"),
+                Err(e) => warn!("⚠️ Failed to flush database: {}", e),
+            }
 
             info!("✨ Scanner exited successfully");
         }

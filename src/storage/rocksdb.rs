@@ -1,10 +1,20 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rocksdb::{DB, Direction, IteratorMode, WriteBatch};
+use rocksdb::{DB, DBCompactionStyle, Direction, IteratorMode, Options, WriteBatch};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::storage::traits::KVStorage;
+use crate::utils::format::format_size_bytes;
+
+#[derive(Clone, Debug)]
+pub struct DatabaseHealth {
+    pub status: String,
+    pub num_keys: u64,
+    pub sst_size: u64,
+    pub l0_files: u64,
+    pub is_healthy: bool,
+}
 
 #[derive(Clone)]
 pub struct RocksDBStorage {
@@ -13,7 +23,44 @@ pub struct RocksDBStorage {
 
 impl RocksDBStorage {
     pub fn new(path: &str) -> Result<Self> {
-        let db = DB::open_default(path)
+        let mut opts = Options::default();
+
+        // ============================
+        // Production-grade RocksDB configuration optimization
+        // ============================
+
+        // 1. Write buffer configuration - reduce frequent flush
+        opts.create_if_missing(true);
+        opts.set_write_buffer_size(256 * 1024 * 1024); // 256MB (default 64MB too small)
+        opts.set_max_write_buffer_number(6); // increase to 6 buffers (default 3)
+        opts.set_min_write_buffer_number_to_merge(2); // merge at least 2 buffers before flush
+
+        // 2. SST file size configuration - reduce number of small files
+        opts.set_target_file_size_base(512 * 1024 * 1024); // 512MB (default 64MB too small)
+        opts.set_max_bytes_for_level_base(2 * 1024 * 1024 * 1024); // 2GB (default 256MB too small)
+        opts.set_max_bytes_for_level_multiplier(10.0); // size multiplier per level
+
+        // 3. Compression configuration - improve compression efficiency
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4); // use LZ4 compression
+        opts.set_compaction_style(DBCompactionStyle::Universal); // universal compaction strategy
+        opts.set_max_background_jobs(8); // increase background compression threads (default 2)
+        opts.set_max_subcompactions(4); // parallel compaction sub-tasks
+
+        // 4. WAL configuration - prevent disk space exhaustion
+        opts.set_max_total_wal_size(1024 * 1024 * 1024); // 1GB WAL size limit
+        opts.set_wal_bytes_per_sync(16 * 1024 * 1024); // sync every 16MB
+        opts.set_bytes_per_sync(16 * 1024 * 1024); // sync every 16MB
+
+        // 5. Error recovery configuration - improve data safety
+        opts.set_paranoid_checks(true); // enable strict checks
+        opts.set_advise_random_on_open(true); // random access optimization
+
+        // 6. Level configuration - optimize level structure
+        opts.set_level_zero_file_num_compaction_trigger(8); // Level 0 compaction trigger file count
+        opts.set_level_zero_slowdown_writes_trigger(20); // Level 0 write slowdown threshold
+        opts.set_level_zero_stop_writes_trigger(36); // Level 0 stop writes threshold
+
+        let db = DB::open(&opts, path)
             .with_context(|| format!("Failed to open RocksDB at path: {}", path))?;
         Ok(Self { db: Arc::new(db) })
     }
@@ -28,6 +75,45 @@ impl RocksDBStorage {
             .write(batch)
             .with_context(|| "Failed to execute batch delete")?;
         Ok(())
+    }
+
+    /// Database health check
+    pub fn health_check(&self) -> Result<DatabaseHealth> {
+        let status = self.db.property_value("rocksdb.dbstats")?;
+        let num_keys = self
+            .db
+            .property_value("rocksdb.estimate-num-keys")?
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        let sst_size = self
+            .db
+            .property_value("rocksdb.total-sst-files-size")?
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        // Check Level 0 file count (too many may cause write blocking)
+        let l0_files = self
+            .db
+            .property_value("rocksdb.num-files-at-level0")?
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        let is_healthy = l0_files < 20; // consider healthy if Level 0 files less than 20
+
+        Ok(DatabaseHealth {
+            status: status.unwrap_or_default(),
+            num_keys,
+            sst_size,
+            l0_files,
+            is_healthy,
+        })
+    }
+
+    /// Flush database to ensure all data is written to disk
+    pub fn flush(&self) -> Result<()> {
+        self.db
+            .flush()
+            .with_context(|| "Failed to flush database to disk")
     }
 
     /// Get database size using RocksDB internal properties
@@ -69,23 +155,6 @@ impl RocksDBStorage {
 
         Ok((format_size_bytes(total_sst), num_keys))
     }
-}
-
-/// Format bytes into human-readable format
-fn format_size_bytes(bytes: u64) -> String {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
-
-    if bytes == 0 {
-        return "0 B".to_string();
-    }
-
-    let bytes_f = bytes as f64;
-    let exp = (bytes_f.ln() / 1024_f64.ln()).floor() as usize;
-    let exp = exp.min(UNITS.len() - 1);
-
-    let size = bytes_f / 1024_f64.powi(exp as i32);
-
-    format!("{:.2} {}", size, UNITS[exp])
 }
 
 impl KVStorage for RocksDBStorage {
