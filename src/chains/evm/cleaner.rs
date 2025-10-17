@@ -10,15 +10,15 @@ use crate::{
     },
     storage::{rocksdb::RocksDBStorage, schema::keys, traits::KVStorage},
 };
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 pub struct EvmCleaner {
     scanner_cfg: ScannerConfig,
-    storage: RocksDBStorage,
+    storage: Arc<RocksDBStorage>,
 }
 
 impl EvmCleaner {
-    pub fn new(scanner_cfg: ScannerConfig, storage: RocksDBStorage) -> Self {
+    pub fn new(scanner_cfg: ScannerConfig, storage: Arc<RocksDBStorage>) -> Self {
         Self {
             scanner_cfg,
             storage,
@@ -382,7 +382,7 @@ mod tests {
     }
 
     // Helper to create test storage
-    fn create_test_storage(test_name: &str) -> (RocksDBStorage, String) {
+    fn create_test_storage(test_name: &str) -> (Arc<RocksDBStorage>, String) {
         let temp_dir = std::env::temp_dir();
         let path = temp_dir.join(format!(
             "rocksdb_cleaner_test_{}_{}",
@@ -394,7 +394,7 @@ mod tests {
         // Clean up if exists
         let _ = std::fs::remove_dir_all(&path_str);
 
-        let storage = RocksDBStorage::new(&path_str).unwrap();
+        let storage = Arc::new(RocksDBStorage::new(&path_str).unwrap());
         (storage, path_str)
     }
 

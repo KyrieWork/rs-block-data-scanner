@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use rs_block_data_scanner::{
@@ -79,7 +81,7 @@ async fn main() -> Result<()> {
             std::fs::create_dir_all(&storage_path)
                 .with_context(|| format!("Failed to create storage directory: {}", storage_path))?;
 
-            let storage = RocksDBStorage::new(&storage_path)?;
+            let storage = Arc::new(RocksDBStorage::new(&storage_path)?);
             storage.init()?;
 
             // Perform database health check

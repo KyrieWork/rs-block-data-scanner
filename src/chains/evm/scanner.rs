@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crate::{
     config::ScannerConfig,
@@ -25,7 +25,7 @@ const MAX_REORG_DEPTH: u64 = 100;
 pub struct EvmScanner {
     pub scanner_cfg: ScannerConfig,
     pub rpc_url: String,
-    pub storage: RocksDBStorage,
+    pub storage: Arc<RocksDBStorage>,
     provider: RootProvider<Http<Client>>,
 }
 
@@ -33,7 +33,7 @@ impl EvmScanner {
     pub fn new(
         scanner_cfg: ScannerConfig,
         rpc_url: String,
-        storage: RocksDBStorage,
+        storage: Arc<RocksDBStorage>,
     ) -> Result<Self> {
         let provider = ProviderBuilder::new().on_http(rpc_url.parse()?);
         Ok(Self {
@@ -709,7 +709,7 @@ mod tests {
         let scanner = EvmScanner::new(
             config,
             TEST_RPC_URL.to_string(),
-            RocksDBStorage::new(&path_str).unwrap(),
+            Arc::new(RocksDBStorage::new(&path_str).unwrap()),
         )
         .unwrap();
 
@@ -950,7 +950,7 @@ mod tests {
         let scanner = EvmScanner::new(
             config,
             TEST_RPC_URL.to_string(),
-            RocksDBStorage::new(&path_str).unwrap(),
+            Arc::new(RocksDBStorage::new(&path_str).unwrap()),
         )
         .unwrap();
 
@@ -1020,7 +1020,7 @@ mod tests {
                 catching_up_interval_millis: 10,
             },
             "http://127.0.0.1:8545".to_string(),
-            RocksDBStorage::new(&path_str).unwrap(),
+            Arc::new(RocksDBStorage::new(&path_str).unwrap()),
         )
         .unwrap();
 
@@ -1075,7 +1075,7 @@ mod tests {
                 catching_up_interval_millis: 10,
             },
             "http://127.0.0.1:8545".to_string(),
-            RocksDBStorage::new(&path_str).unwrap(),
+            Arc::new(RocksDBStorage::new(&path_str).unwrap()),
         )
         .unwrap();
 
@@ -1152,7 +1152,7 @@ mod tests {
                 catching_up_interval_millis: 10,
             },
             "http://127.0.0.1:8545".to_string(),
-            RocksDBStorage::new(&path_str).unwrap(),
+            Arc::new(RocksDBStorage::new(&path_str).unwrap()),
         )
         .unwrap();
 
@@ -1198,7 +1198,7 @@ mod tests {
                 catching_up_interval_millis: 10,
             },
             "http://127.0.0.1:8545".to_string(),
-            RocksDBStorage::new(&path_str).unwrap(),
+            Arc::new(RocksDBStorage::new(&path_str).unwrap()),
         )
         .unwrap();
 
@@ -1293,7 +1293,7 @@ mod tests {
                 catching_up_interval_millis: 10,
             },
             "http://127.0.0.1:8545".to_string(),
-            RocksDBStorage::new(&path_str).unwrap(),
+            Arc::new(RocksDBStorage::new(&path_str).unwrap()),
         )
         .unwrap();
 
