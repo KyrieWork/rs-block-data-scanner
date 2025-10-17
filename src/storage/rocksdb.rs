@@ -32,7 +32,7 @@ impl RocksDBStorage {
         // 1. Write buffer configuration - reduce frequent flush
         opts.create_if_missing(true);
         opts.set_write_buffer_size(256 * 1024 * 1024); // 256MB (default 64MB too small)
-        opts.set_max_write_buffer_number(6); // increase to 6 buffers (default 3)
+        opts.set_max_write_buffer_number(4); // increase to 4 buffers (default 3)
         opts.set_min_write_buffer_number_to_merge(2); // merge at least 2 buffers before flush
 
         // 2. SST file size configuration - reduce number of small files
@@ -114,6 +114,22 @@ impl RocksDBStorage {
         self.db
             .flush()
             .with_context(|| "Failed to flush database to disk")
+    }
+
+    /// Force cleanup of memory buffers and prepare for shutdown
+    /// This method should be called before program exit to ensure proper resource cleanup
+    pub fn force_cleanup(&self) -> Result<()> {
+        // Flush all pending writes
+        self.db.flush()?;
+
+        // Force compaction to reduce memory usage
+        // This will trigger immediate compaction of memtables
+        self.db.compact_range::<&[u8], &[u8]>(None, None);
+
+        // Note: RocksDB doesn't provide a direct way to clear memtables
+        // The above operations should help reduce memory usage before exit
+
+        Ok(())
     }
 
     /// Get database size using RocksDB internal properties

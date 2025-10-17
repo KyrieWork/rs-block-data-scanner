@@ -203,13 +203,6 @@ impl EvmScanner {
                         "⚠️ debug_traceBlockByHash not supported by this node, using empty trace data"
                     );
                     Ok("[]".to_string()) // Return empty array as fallback
-                } else if error_msg.contains("-32000")
-                    || error_msg.contains("required historical state unavailable")
-                {
-                    warn!(
-                        "⚠️ Historical state unavailable for debug_traceBlockByHash, using empty trace data"
-                    );
-                    Ok("[]".to_string()) // Return empty array as fallback
                 } else {
                     Err(anyhow::anyhow!("debug_traceBlockByHash failed: {}", e))
                 }

@@ -135,15 +135,22 @@ async fn main() -> Result<()> {
                                 break;
                             }
                             _ = tokio::time::sleep(std::time::Duration::from_secs(cleanup_interval)) => {
-                                match cleaner.cleanup().await {
-                                    Ok(count) if count > 0 => {
+                                // Add timeout to cleanup operation to prevent hanging
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(30), // 30 second timeout
+                                    cleaner.cleanup()
+                                ).await {
+                                    Ok(Ok(count)) if count > 0 => {
                                         info!("🧹 Cleanup cycle completed: {} blocks removed", count);
                                     }
-                                    Ok(_) => {
+                                    Ok(Ok(_)) => {
                                         debug!("🧹 Cleanup cycle completed: no blocks to remove");
                                     }
-                                    Err(e) => {
+                                    Ok(Err(e)) => {
                                         warn!("⚠️ Cleanup failed: {}", e);
+                                    }
+                                    Err(_timeout) => {
+                                        warn!("⚠️ Cleanup operation timed out after 30 seconds");
                                     }
                                 }
 
@@ -162,10 +169,11 @@ async fn main() -> Result<()> {
 
             scanner.run(shutdown_rx).await?;
 
-            // Flush database before exit to ensure data consistency
-            match storage.flush() {
-                Ok(_) => info!("✅ Database flushed successfully"),
-                Err(e) => warn!("⚠️ Failed to flush database: {}", e),
+            // Force cleanup of memory buffers and prepare for shutdown
+            info!("🧹 Starting resource cleanup...");
+            match storage.force_cleanup() {
+                Ok(_) => info!("✅ Database cleanup completed successfully"),
+                Err(e) => warn!("⚠️ Failed to cleanup database: {}", e),
             }
 
             info!("✨ Scanner exited successfully");
