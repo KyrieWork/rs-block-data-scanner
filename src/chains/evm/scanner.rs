@@ -39,22 +39,36 @@ impl EvmScanner {
 
     /// Initialize scanner progress
     pub async fn init(&self) -> Result<()> {
-        let start_block = if self.scanner_cfg.start_block == 0 {
-            // If start_block is 0, start from the latest block
-            let latest_block = self.client.get_latest_block_number().await?;
-            info!("🚀 Start block is 0, using latest block: {}", latest_block);
-            latest_block
-        } else {
-            self.scanner_cfg.start_block
-        };
+        // Check if progress already exists
+        match self.storage_manager.progress.get() {
+            Ok(existing_progress) => {
+                info!(
+                    "📊 Found existing progress, continuing from block: {}",
+                    existing_progress.current_block
+                );
+                info!("✅ Scanner initialized with existing progress");
+                Ok(())
+            }
+            Err(_) => {
+                // No existing progress, initialize with start_block
+                let start_block = if self.scanner_cfg.start_block == 0 {
+                    // If start_block is 0, start from the latest block
+                    let latest_block = self.client.get_latest_block_number().await?;
+                    info!("🚀 Start block is 0, using latest block: {}", latest_block);
+                    latest_block
+                } else {
+                    self.scanner_cfg.start_block
+                };
 
-        let progress = self
-            .storage_manager
-            .progress
-            .get_initial_progress(start_block);
-        self.storage_manager.progress.update(progress)?;
-        info!("✅ Scanner initialized with start_block: {}", start_block);
-        Ok(())
+                let progress = self
+                    .storage_manager
+                    .progress
+                    .get_initial_progress(start_block);
+                self.storage_manager.progress.update(progress)?;
+                info!("✅ Scanner initialized with start_block: {}", start_block);
+                Ok(())
+            }
+        }
     }
 
     /// Get target block and network latest block
