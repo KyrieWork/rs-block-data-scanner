@@ -3446,6 +3446,7 @@ dependencies = [
  "dotenvy",
  "metrics 0.21.1",
  "metrics-exporter-prometheus",
+ "once_cell",
  "rocksdb",
  "serde",
  "serde_json",

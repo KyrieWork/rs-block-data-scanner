@@ -3,6 +3,7 @@ use config as config_loader;
 use dotenvy::dotenv;
 use serde::Deserialize;
 use std::path::Path;
+use tracing::info;
 
 /// Global config structure
 #[derive(Debug, Deserialize, Clone)]
@@ -50,8 +51,6 @@ pub struct ScannerConfig {
     pub start_block: u64,
     #[serde(default = "ScannerConfig::default_confirm_blocks")]
     pub confirm_blocks: u64,
-    #[serde(default = "ScannerConfig::default_realtime")]
-    pub realtime: bool,
     #[serde(default = "ScannerConfig::default_timeout_secs")]
     pub timeout_secs: u64,
 
@@ -60,12 +59,18 @@ pub struct ScannerConfig {
     pub cleanup_enabled: bool,
     #[serde(default)]
     pub retention_blocks: Option<u64>,
-    #[serde(default = "ScannerConfig::default_cleanup_interval_secs")]
-    pub cleanup_interval_secs: u64,
+    #[serde(default = "ScannerConfig::default_cleanup_interval_blocks")]
+    pub cleanup_interval_blocks: u64,
     #[serde(default = "ScannerConfig::default_cleanup_batch_size")]
     pub cleanup_batch_size: usize,
     #[serde(default = "ScannerConfig::default_cleanup_orphaned_enabled")]
     pub cleanup_orphaned_enabled: bool,
+
+    // Scan configuration
+    #[serde(default = "ScannerConfig::default_batch_save_size")]
+    pub batch_save_size: usize,
+    #[serde(default = "ScannerConfig::default_reorg_check_enabled")]
+    pub reorg_check_enabled: bool,
 
     // Scan interval configuration
     #[serde(default = "ScannerConfig::default_synced_interval_secs")]
@@ -84,17 +89,14 @@ impl ScannerConfig {
     fn default_confirm_blocks() -> u64 {
         10
     }
-    fn default_realtime() -> bool {
-        true
-    }
     fn default_timeout_secs() -> u64 {
         15
     }
     fn default_cleanup_enabled() -> bool {
         false
     }
-    fn default_cleanup_interval_secs() -> u64 {
-        3600 // 1 hour
+    fn default_cleanup_interval_blocks() -> u64 {
+        100 // Every 100 blocks
     }
     fn default_cleanup_batch_size() -> usize {
         1000
@@ -107,6 +109,29 @@ impl ScannerConfig {
     }
     fn default_catching_up_interval_millis() -> u64 {
         10 // 10 milliseconds when catching up
+    }
+    fn default_batch_save_size() -> usize {
+        50 // Save 50 blocks at a time
+    }
+    fn default_reorg_check_enabled() -> bool {
+        true
+    }
+
+    /// Validate scanner configuration
+    pub fn validate(&self) -> Result<()> {
+        if self.start_block == 0 {
+            info!("⚠️ Start block is 0, scanner will start from the latest block");
+        }
+
+        if self.concurrency == 0 {
+            anyhow::bail!("Concurrency must be greater than 0");
+        }
+
+        if self.batch_save_size == 0 {
+            anyhow::bail!("Batch save size must be greater than 0");
+        }
+
+        Ok(())
     }
 }
 

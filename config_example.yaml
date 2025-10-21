@@ -1,101 +1,135 @@
 # ============================
-# Global scanning service configuration
+# Block Data Scanner Configuration
+# ============================
+# This configuration file defines all settings for the blockchain data scanner.
+# The scanner supports multiple chains and provides real-time block data collection.
+
+# ============================
+# Basic Scanner Configuration
 # ============================
 scanner:
-  # Current scanning chain type: evm | solana
+  # Chain type: "evm" (Ethereum Virtual Machine) or "solana"
   chain_type: "evm"
-
-  # Chain name
+  
+  # Chain name identifier (used for storage paths and logging)
   chain_name: "ethereum"
-
-  # Scan start block number (0 = latest block)
+  
+  # Starting block number for scanning (0 = start from latest block)
   start_block: 0
 
-  # Confirm blocks (e.g. EVM finality 12 blocks)
-  confirm_blocks: 5
-
-  # Concurrency (concurrent RPC requests)
-  concurrency: 4
-
-  # Whether to enable real-time tracking mode (when the latest block is reached, continue to listen)
-  realtime: true
-
-  # Node request timeout (seconds)
-  timeout_secs: 15
-
   # ============================
-  # Scan interval configuration
+  # Scanning Behavior Settings
   # ============================
   
-  # Scan interval when synced (seconds)
-  # Default: 3 seconds
+  # Number of concurrent RPC requests (higher = faster but more resource intensive)
+  # Values > 1 enable concurrent scanning during catch-up phase
+  concurrency: 4
+  
+  # RPC request timeout in seconds
+  timeout_secs: 15
+  
+  # Number of blocks to wait for finality before scanning (prevents reorg issues)
+  confirm_blocks: 5
+
+  # ============================
+  # Scan Timing Configuration
+  # ============================
+  
+  # Scan interval when fully synced (seconds)
+  # Lower values = more frequent checks but higher RPC load
   synced_interval_secs: 3
   
   # Scan interval when catching up (milliseconds)
-  # Default: 10 milliseconds
+  # Lower values = faster catch-up but higher RPC load
   catching_up_interval_millis: 10
 
   # ============================
-  # Cleanup configuration
+  # Performance Optimization
+  # ============================
+  
+  # Batch size for saving blocks to storage
+  # Larger batches = better performance but more memory usage
+  batch_save_size: 50
+  
+  # Enable reorganization detection and handling
+  # Recommended: true (prevents data corruption from chain reorgs)
+  reorg_check_enabled: true
+
+  # ============================
+  # Data Cleanup Configuration
   # ============================
   
   # Enable automatic cleanup of old block data
+  # WARNING: This will permanently delete old blocks!
   cleanup_enabled: false
   
-  # Number of blocks to retain (blocks older than this will be deleted)
-  # Example: 10000 means keep the latest 10000 blocks
-  # If not set or 0, cleanup will be skipped
-  retention_blocks: 10000
+  # Number of recent blocks to retain (older blocks will be deleted)
+  # Set to null or 0 to disable retention-based cleanup
+  retention_blocks: 1000
   
-  # Cleanup interval in seconds (how often to run cleanup)
-  # Default: 3600 (1 hour)
-  cleanup_interval_secs: 3600
+  # Cleanup frequency in blocks (how often to run cleanup)
+  # Lower values = more frequent cleanup but higher overhead
+  cleanup_interval_blocks: 100
   
-  # Batch size for cleanup operations (blocks per batch)
-  # Larger batches are faster but use more memory
-  # Default: 1000
+  # Batch size for cleanup operations
+  # Larger batches = faster cleanup but more memory usage
   cleanup_batch_size: 1000
   
-  # Enable cleanup of orphaned data (blocks not referenced by active indexes)
-  # This is more resource-intensive as it scans all block data
-  # Default: false (disabled)
+  # Enable cleanup of orphaned data (unreferenced blocks)
+  # WARNING: This is resource-intensive and scans all stored data
   cleanup_orphaned_enabled: false
 
 # ============================
-# RPC node configuration
+# RPC Node Configuration
 # ============================
 rpc:
-  # Main node RPC address
+  # Primary RPC endpoint URL
+  # Replace with your actual RPC provider URL and API key
   url: "https://mainnet.infura.io/v3/YOUR_API_KEY"
-
-  # Node backup list (optional)
+  
+  # Backup RPC endpoints (optional)
+  # Used automatically if primary endpoint fails
   backups:
     - "https://eth.llamarpc.com"
     - "https://rpc.flashbots.net"
 
 # ============================
-# Storage layer configuration
+# Storage Configuration
 # ============================
 storage:
-  # RocksDB storage base path
-  # Actual path will be: {path}/{chain_name}
+  # Base directory for RocksDB storage
+  # Final path will be: {path}/{chain_name}/
   # Examples:
-  #   - Ethereum: ./data/rocksdb/Ethereum
-  #   - BSC: ./data/rocksdb/BSC
-  # This allows multiple chains to run concurrently without conflicts
+  #   - Ethereum: ./data/rocksdb/ethereum/
+  #   - BSC: ./data/rocksdb/bsc/
   path: "./data/rocksdb"
-
-  # Whether to enable compression
+  
+  # Enable RocksDB compression (recommended for disk space savings)
   compression: true
+  
+  # Custom column families for data organization (optional)
+  # Uncomment and modify as needed for your use case
+  # column_families: ["blocks", "transactions", "logs"]
 
 # ============================
-# Logging and monitoring configuration
+# Logging Configuration
 # ============================
 logging:
-  level: "info" # Optional: trace, debug, info, warn, error
-  to_file: true # Whether to output to file
+  # Log level: trace, debug, info, warn, error
+  level: "info"
+  
+  # Enable file logging (recommended for production)
+  to_file: true
+  
+  # Log file directory
   path: "./logs"
 
+# ============================
+# Metrics Configuration
+# ============================
 metrics:
+  # Enable Prometheus metrics export
   enable: true
+  
+  # Port for Prometheus metrics endpoint
   prometheus_exporter_port: 9100
