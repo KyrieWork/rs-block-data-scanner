@@ -42,6 +42,10 @@ scanner:
   # Scan interval when catching up (milliseconds)
   # Lower values = faster catch-up but higher RPC load
   catching_up_interval_millis: 10
+  
+  # Scan interval on error (seconds)
+  # How long to wait before retrying after a scan error
+  error_interval_secs: 1
 
   # ============================
   # Performance Optimization

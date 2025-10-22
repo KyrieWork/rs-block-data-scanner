@@ -1,8 +1,8 @@
 use crate::{
     config::ScannerConfig,
-    core::table::{BlockData, BlockIndex, BlockIndexHistory},
+    core::table::BlockData,
     storage::manager::{ScannerBlockIndexStorage, ScannerProgressStorage},
-    storage::{rocksdb::RocksDBStorage, schema::keys, traits::KVStorage},
+    storage::rocksdb::RocksDBStorage,
 };
 use anyhow::Result;
 use chrono::Utc;
@@ -71,75 +71,8 @@ impl EvmChecker {
         Ok(matches)
     }
 
-    /// Update block index on reorg - move current index to history and update active index
-    pub fn update_block_index_on_reorg(
-        &self,
-        block_number: u64,
-        new_block_data: &BlockData,
-    ) -> Result<()> {
-        let timestamp = Utc::now().timestamp();
-
-        // Parse new block data to get parent_hash
-        let block: serde_json::Value = serde_json::from_str(&new_block_data.block_data_json)?;
-        let new_parent_hash = if let Some(parent) = block["header"]["parent_hash"].as_str() {
-            parent.to_string()
-        } else if let Some(parent) = block["parentHash"].as_str() {
-            parent.to_string()
-        } else {
-            return Err(anyhow::anyhow!(
-                "Failed to parse parentHash from block data"
-            ));
-        };
-
-        // Prepare batch operations
-        let mut batch_operations = Vec::new();
-
-        // 1. Get current active index and move to history
-        let active_key = keys::block_index_active_key(&self.scanner_cfg.chain_name, block_number);
-        if let Some(current_index) = self.storage.read_json::<BlockIndex>(&active_key)? {
-            // 2. Move current index to history table
-            let history_key = keys::block_index_history_key(
-                &self.scanner_cfg.chain_name,
-                block_number,
-                timestamp,
-            );
-            let history_entry = BlockIndexHistory {
-                block_hash: current_index.block_hash.clone(),
-                parent_hash: current_index.parent_hash.clone(),
-                created_at: current_index.created_at,
-                is_active: false,
-                version: timestamp as u64,
-                replaced_at: Some(Utc::now()),
-            };
-            batch_operations.push((history_key, serde_json::to_string(&history_entry)?));
-            debug!(
-                "📝 Moved block {} index to history: {}",
-                block_number, current_index.block_hash
-            );
-        }
-
-        // 3. Update active index
-        let new_index = BlockIndex {
-            block_hash: new_block_data.hash.clone(),
-            parent_hash: new_parent_hash,
-            created_at: Utc::now(),
-        };
-        batch_operations.push((active_key, serde_json::to_string(&new_index)?));
-        debug!(
-            "✅ Updated active index for block {}: {}",
-            block_number, new_block_data.hash
-        );
-
-        // Execute batch write
-        if !batch_operations.is_empty() {
-            self.storage.batch_write(batch_operations)?;
-        }
-
-        Ok(())
-    }
-
     /// Handle reorg by updating block index and progress
-    pub fn handle_reorg(&self, block_number: u64, new_block_data: &BlockData) -> Result<()> {
+    pub fn handle_reorg(&self, block_number: u64, block_data: &BlockData) -> Result<()> {
         let progress = self.progress.get()?;
         let rollback_block = block_number - 1;
 
@@ -161,15 +94,15 @@ impl EvmChecker {
             ));
         }
 
-        // Update index instead of deleting data
-        self.update_block_index_on_reorg(rollback_block, new_block_data)?;
+        // Move active index to history
+        self.index.active_move_to_history(block_number)?;
 
         // Update progress
         self.update_back_progress(rollback_block - 1, Some(rollback_block))?;
 
         warn!(
             "⚠️ Reorg detected at block {}! Updated index to new hash: {}",
-            rollback_block, new_block_data.hash
+            rollback_block, block_data.hash
         );
 
         Ok(())

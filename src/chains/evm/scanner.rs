@@ -348,8 +348,8 @@ impl EvmScanner {
                         }
                         Err(e) => {
                             error!("❌ Scan error: {}", e);
-                            // Use default interval on error
-                            tokio::time::sleep(Duration::from_secs(3)).await;
+                            // Use configured interval on error
+                            tokio::time::sleep(Duration::from_secs(self.scanner_cfg.error_interval_secs)).await;
                         }
                     }
                 }

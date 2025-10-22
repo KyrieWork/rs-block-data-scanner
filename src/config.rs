@@ -77,6 +77,8 @@ pub struct ScannerConfig {
     pub synced_interval_secs: u64,
     #[serde(default = "ScannerConfig::default_catching_up_interval_millis")]
     pub catching_up_interval_millis: u64,
+    #[serde(default = "ScannerConfig::default_error_interval_secs")]
+    pub error_interval_secs: u64,
 }
 
 impl ScannerConfig {
@@ -115,6 +117,9 @@ impl ScannerConfig {
     }
     fn default_reorg_check_enabled() -> bool {
         true
+    }
+    fn default_error_interval_secs() -> u64 {
+        1 // 1 second on error
     }
 
     /// Validate scanner configuration

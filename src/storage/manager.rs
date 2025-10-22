@@ -89,6 +89,22 @@ impl ScannerBlockIndexStorage {
 
         self.storage.batch_write(writes)
     }
+
+    pub fn active_move_to_history(&self, block_number: u64) -> Result<()> {
+        let key = keys::block_index_active_key(&self.chain, block_number);
+        let value = self.storage.read(&key)?;
+
+        let mut writes = Vec::new();
+        let mut cleanup_keys = Vec::new();
+
+        if let Some(value) = value {
+            let history_key =
+                keys::block_index_history_key(&self.chain, block_number, Utc::now().timestamp());
+            writes.push((history_key, value));
+            cleanup_keys.push(key.into_bytes());
+        }
+        self.storage.batch_write_delete(writes, cleanup_keys)
+    }
 }
 
 pub struct ScannerBlockDataStorage {
