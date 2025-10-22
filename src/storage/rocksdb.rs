@@ -26,39 +26,51 @@ impl RocksDBStorage {
         let mut opts = Options::default();
 
         // ============================
-        // Production-grade RocksDB configuration optimization
+        // Balanced RocksDB configuration for LARGE BLOCK DATA (500MB-1GB per block)
+        // Optimized for performance while controlling resource consumption
         // ============================
 
-        // 1. Write buffer configuration - reduce frequent flush
+        // 1. Write buffer configuration - balanced for large values
         opts.create_if_missing(true);
-        opts.set_write_buffer_size(256 * 1024 * 1024); // 256MB (default 64MB too small)
-        opts.set_max_write_buffer_number(4); // increase to 4 buffers (default 3)
-        opts.set_min_write_buffer_number_to_merge(2); // merge at least 2 buffers before flush
+        opts.set_write_buffer_size(1024 * 1024 * 1024); // 1GB (balanced for large blocks)
+        opts.set_max_write_buffer_number(4); // 4 buffers (controlled memory usage)
+        opts.set_min_write_buffer_number_to_merge(2); // merge 2 buffers before flush
 
-        // 2. SST file size configuration - reduce number of small files
-        opts.set_target_file_size_base(512 * 1024 * 1024); // 512MB (default 64MB too small)
-        opts.set_max_bytes_for_level_base(2 * 1024 * 1024 * 1024); // 2GB (default 256MB too small)
-        opts.set_max_bytes_for_level_multiplier(10.0); // size multiplier per level
+        // 2. SST file size configuration - optimized for large block data
+        opts.set_target_file_size_base(2 * 1024 * 1024 * 1024); // 2GB (reasonable for large blocks)
+        opts.set_max_bytes_for_level_base(8 * 1024 * 1024 * 1024); // 8GB (controlled growth)
+        opts.set_max_bytes_for_level_multiplier(10.0); // standard multiplier
 
-        // 3. Compression configuration - improve compression efficiency
-        opts.set_compression_type(rocksdb::DBCompressionType::Lz4); // use LZ4 compression
-        opts.set_compaction_style(DBCompactionStyle::Universal); // universal compaction strategy
-        opts.set_max_background_jobs(8); // increase background compression threads (default 2)
-        opts.set_max_subcompactions(4); // parallel compaction sub-tasks
+        // 3. Compression configuration - balanced for large JSON data
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4); // Lz4 faster than Zstd
+        opts.set_compaction_style(DBCompactionStyle::Universal); // universal compaction for large values
+        opts.set_max_background_jobs(6); // balanced background threads
+        opts.set_max_subcompactions(3); // moderate parallel compaction
 
-        // 4. WAL configuration - prevent disk space exhaustion
-        opts.set_max_total_wal_size(1024 * 1024 * 1024); // 1GB WAL size limit
-        opts.set_wal_bytes_per_sync(16 * 1024 * 1024); // sync every 16MB
-        opts.set_bytes_per_sync(16 * 1024 * 1024); // sync every 16MB
+        // 4. WAL configuration - balanced for large block writes
+        opts.set_max_total_wal_size(2 * 1024 * 1024 * 1024); // 2GB WAL (controlled size)
+        opts.set_wal_bytes_per_sync(32 * 1024 * 1024); // sync every 32MB (balanced)
+        opts.set_bytes_per_sync(32 * 1024 * 1024); // sync every 32MB (balanced)
 
         // 5. Error recovery configuration - improve data safety
         opts.set_paranoid_checks(true); // enable strict checks
         opts.set_advise_random_on_open(true); // random access optimization
 
-        // 6. Level configuration - optimize level structure
-        opts.set_level_zero_file_num_compaction_trigger(8); // Level 0 compaction trigger file count
-        opts.set_level_zero_slowdown_writes_trigger(20); // Level 0 write slowdown threshold
-        opts.set_level_zero_stop_writes_trigger(36); // Level 0 stop writes threshold
+        // 6. Level configuration - optimized for large block data
+        opts.set_level_zero_file_num_compaction_trigger(6); // balanced trigger
+        opts.set_level_zero_slowdown_writes_trigger(12); // balanced threshold
+        opts.set_level_zero_stop_writes_trigger(20); // balanced threshold
+
+        // 7. Memory and performance optimizations
+        opts.set_use_direct_reads(true); // direct I/O for better performance
+        opts.set_use_direct_io_for_flush_and_compaction(true); // direct I/O for compaction
+        opts.set_allow_concurrent_memtable_write(true); // concurrent writes
+        opts.set_enable_write_thread_adaptive_yield(true); // adaptive yielding
+        
+        // 8. Large value optimizations
+        opts.set_max_manifest_file_size(1024 * 1024 * 1024); // 1GB manifest file size
+        opts.set_delete_obsolete_files_period_micros(21600000000); // 6 hours cleanup interval
+        opts.set_max_sequential_skip_in_iterations(8); // optimize for large sequential reads
 
         let db = DB::open(&opts, path)
             .with_context(|| format!("Failed to open RocksDB at path: {}", path))?;
@@ -147,12 +159,11 @@ impl RocksDBStorage {
         // Flush all pending writes
         self.db.flush()?;
 
-        // Force compaction to reduce memory usage
-        // This will trigger immediate compaction of memtables
-        self.db.compact_range::<&[u8], &[u8]>(None, None);
-
-        // Note: RocksDB doesn't provide a direct way to clear memtables
-        // The above operations should help reduce memory usage before exit
+        // Note: Avoid full compaction on shutdown as it can cause:
+        // 1. Long blocking time
+        // 2. Memory spikes
+        // 3. Potential data corruption if interrupted
+        // RocksDB will handle cleanup automatically on next startup
 
         Ok(())
     }

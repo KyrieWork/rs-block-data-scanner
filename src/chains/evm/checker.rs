@@ -50,15 +50,18 @@ impl EvmChecker {
         let prev_block_number = block_number - 1;
         let prev_block_index = self.index.get_active(prev_block_number).ok();
 
-        if prev_block_index.is_none() {
-            debug!(
-                "Previous block {} not found in active index, allowing scan to continue",
-                prev_block_number
-            );
-            return Ok(true);
-        }
+        let prev_block_index = match prev_block_index {
+            Some(index) => index,
+            None => {
+                debug!(
+                    "Previous block {} not found in active index, allowing scan to continue",
+                    prev_block_number
+                );
+                return Ok(true);
+            }
+        };
 
-        let prev_block_hash = prev_block_index.unwrap().block_hash;
+        let prev_block_hash = prev_block_index.block_hash;
         let stored_hash = &prev_block_hash;
 
         debug!(

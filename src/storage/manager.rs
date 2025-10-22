@@ -66,12 +66,20 @@ impl ScannerBlockIndexStorage {
 
     pub fn get_history_list(&self, block_number: u64) -> Result<Vec<BlockIndexHistory>> {
         let prefix = keys::block_index_history_prefix(&self.chain, block_number);
-        self.storage.scan_prefix(&prefix, None).map(|results| {
-            results
-                .into_iter()
-                .map(|(_, value)| serde_json::from_str::<BlockIndexHistory>(&value).unwrap())
-                .collect()
-        })
+        let results = self.storage.scan_prefix(&prefix, None)?;
+
+        let mut history_list = Vec::new();
+        for (_, value) in results {
+            match serde_json::from_str::<BlockIndexHistory>(&value) {
+                Ok(history) => history_list.push(history),
+                Err(e) => {
+                    tracing::warn!("Failed to parse block index history: {}", e);
+                    // Continue processing other entries instead of failing completely
+                }
+            }
+        }
+
+        Ok(history_list)
     }
 
     /// Batch save multiple block indexes

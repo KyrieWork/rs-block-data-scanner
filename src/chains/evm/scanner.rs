@@ -124,13 +124,21 @@ impl EvmScanner {
             handles.push(handle);
         }
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(count);
         let mut failed_count = 0;
 
+        // Process results in order to maintain block sequence
         for (i, handle) in handles.into_iter().enumerate() {
             let block_number = start_block + i as u64;
             match handle.await? {
-                Ok(Ok(block_data)) => results.push(block_data),
+                Ok(Ok(block_data)) => {
+                    if block_data.hash.is_empty() {
+                        error!("Empty block hash for block {}", block_number);
+                        failed_count += 1;
+                    } else {
+                        results.push(block_data);
+                    }
+                }
                 Ok(Err(e)) => {
                     error!("Failed to fetch block {}: {}", block_number, e);
                     failed_count += 1;
