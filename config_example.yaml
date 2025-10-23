@@ -58,6 +58,30 @@ scanner:
   # Enable reorganization detection and handling
   # Recommended: true (prevents data corruption from chain reorgs)
   reorg_check_enabled: true
+  
+  # ============================
+  # Reorg Detection Configuration
+  # ============================
+  
+  # Maximum number of blocks to rollback during reorg detection
+  # If reorg depth exceeds this limit, service will terminate
+  max_rollback_depth: 100
+  
+  # Number of consecutive deep reorg detections before service termination
+  # Helps prevent false positives from network issues
+  deep_reorg_confirmation_count: 3
+  
+  # Number of consecutive successful scans to exit reorg mode
+  # Reorg mode limits scanning to single blocks for safety
+  reorg_mode_exit_threshold: 5
+  
+  # Maximum time to stay in reorg mode (seconds)
+  # Prevents indefinite single-block scanning
+  reorg_mode_exit_timeout: 300
+  
+  # Maximum retry count for failed operations
+  # Used for network errors and data format issues
+  max_retry_count: 3
 
   # ============================
   # Data Cleanup Configuration

@@ -79,6 +79,18 @@ pub struct ScannerConfig {
     pub catching_up_interval_millis: u64,
     #[serde(default = "ScannerConfig::default_error_interval_secs")]
     pub error_interval_secs: u64,
+
+    // Reorg detection configuration
+    #[serde(default = "ScannerConfig::default_max_rollback_depth")]
+    pub max_rollback_depth: u64,
+    #[serde(default = "ScannerConfig::default_deep_reorg_confirmation_count")]
+    pub deep_reorg_confirmation_count: u32,
+    #[serde(default = "ScannerConfig::default_reorg_mode_exit_threshold")]
+    pub reorg_mode_exit_threshold: u64,
+    #[serde(default = "ScannerConfig::default_reorg_mode_exit_timeout")]
+    pub reorg_mode_exit_timeout: u64,
+    #[serde(default = "ScannerConfig::default_max_retry_count")]
+    pub max_retry_count: u32,
 }
 
 impl ScannerConfig {
@@ -121,6 +133,21 @@ impl ScannerConfig {
     fn default_error_interval_secs() -> u64 {
         1 // 1 second on error
     }
+    fn default_max_rollback_depth() -> u64 {
+        100 // Maximum rollback depth
+    }
+    fn default_deep_reorg_confirmation_count() -> u32 {
+        3 // Confirm deep reorg after 3 detections
+    }
+    fn default_reorg_mode_exit_threshold() -> u64 {
+        5 // Exit reorg mode after 5 consecutive successes
+    }
+    fn default_reorg_mode_exit_timeout() -> u64 {
+        300 // 5 minutes timeout for reorg mode
+    }
+    fn default_max_retry_count() -> u32 {
+        3 // Maximum retry count for failed operations
+    }
 
     /// Validate scanner configuration
     pub fn validate(&self) -> Result<()> {
@@ -134,6 +161,14 @@ impl ScannerConfig {
 
         if self.batch_save_size == 0 {
             anyhow::bail!("Batch save size must be greater than 0");
+        }
+
+        if self.max_rollback_depth == 0 {
+            anyhow::bail!("Max rollback depth must be greater than 0");
+        }
+
+        if self.deep_reorg_confirmation_count == 0 {
+            anyhow::bail!("Deep reorg confirmation count must be greater than 0");
         }
 
         Ok(())

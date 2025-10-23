@@ -1,9 +1,13 @@
 use std::{sync::Arc, time::Duration};
 
 use crate::{
-    chains::evm::{checker::EvmChecker, cleaner::EvmCleaner, client::EvmClient},
+    chains::evm::{
+        checker::{BatchVerificationResult, EvmChecker},
+        cleaner::EvmCleaner,
+        client::EvmClient,
+    },
     config::ScannerConfig,
-    core::table::{BlockData, ScannerProgress},
+    core::table::{BlockData, ScannerProgress, ScannerStatus},
     storage::manager::ScannerStorageManager,
 };
 use anyhow::Result;
@@ -221,14 +225,17 @@ impl EvmScanner {
         // Check if there are new blocks to scan
         if target_block > progress.current_block {
             let blocks_to_scan = (target_block - progress.current_block) as usize;
+
+            // Get scan concurrency based on current status
+            let concurrency = self.get_scan_concurrency()?;
+
             let scan_count = if self.is_synced(progress.current_block, network_latest_block) {
                 // Synced: scan one block at a time
                 1
             } else {
-                // Catching up: scan multiple blocks concurrently if concurrency > 1
-                if self.scanner_cfg.concurrency > 1 {
-                    let max_concurrent =
-                        std::cmp::min(blocks_to_scan, self.scanner_cfg.concurrency);
+                // Catching up: scan multiple blocks concurrently based on status
+                if concurrency > 1 {
+                    let max_concurrent = std::cmp::min(blocks_to_scan, concurrency);
                     let max_batch = self.scanner_cfg.batch_save_size;
                     std::cmp::min(max_concurrent, max_batch)
                 } else {
@@ -244,26 +251,43 @@ impl EvmScanner {
             let start_block = progress.current_block + 1;
             let blocks = self.scan_blocks_concurrent(start_block, scan_count).await?;
 
-            // Verify reorg for each block if enabled
+            // Verify batch continuity if enabled
             if self.scanner_cfg.reorg_check_enabled {
-                for (i, block_data) in blocks.iter().enumerate() {
-                    let block_number = start_block + i as u64;
+                let verification_result =
+                    self.checker.verify_batch_continuity(&blocks, start_block)?;
 
-                    if block_number > self.scanner_cfg.start_block {
-                        // Parse parent_hash from block data
-                        let block: serde_json::Value =
-                            serde_json::from_str(&block_data.block_data_json)?;
-                        let parent_hash = block["parentHash"].as_str().ok_or_else(|| {
-                            anyhow::anyhow!("Failed to parse parent_hash from block data")
-                        })?;
-
-                        // Verify reorg
-                        if !self.checker.verify_reorg(parent_hash, block_number)? {
-                            // Reorg detected, handle rollback
-                            self.checker.handle_reorg(block_number, block_data)?;
-                            info!("🔄 Reorg handled at block {}", block_number);
-                            return self.storage_manager.progress.get();
-                        }
+                match verification_result {
+                    BatchVerificationResult::Valid => {
+                        // Verification passed, continue with saving
+                    }
+                    BatchVerificationResult::ReorgDetected {
+                        reorg_block,
+                        reorg_type: _,
+                        suggested_rollback_depth,
+                    } => {
+                        // Handle reorg detection
+                        self.handle_reorg_detection(reorg_block, suggested_rollback_depth)
+                            .await?;
+                        return self.storage_manager.progress.get();
+                    }
+                    BatchVerificationResult::ContinuityBroken {
+                        broken_block,
+                        error_type,
+                    } => {
+                        // Handle continuity break - reset success count
+                        self.handle_continuity_break(broken_block, error_type)
+                            .await?;
+                        self.reset_success_count()?;
+                        return self.storage_manager.progress.get();
+                    }
+                    BatchVerificationResult::ValidationError {
+                        message,
+                        block_number,
+                    } => {
+                        // Handle validation error - reset success count
+                        self.handle_validation_error(message, block_number).await?;
+                        self.reset_success_count()?;
+                        return self.storage_manager.progress.get();
                     }
                 }
             }
@@ -274,15 +298,26 @@ impl EvmScanner {
             // Update progress only after successful save
             let previous_block = progress.current_block;
             progress.current_block += scan_count as u64;
+            progress.consecutive_success_count += 1;
+
+            // Check if should exit reorg mode
+            if progress.status == ScannerStatus::ReorgDetected
+                && self.checker.should_exit_reorg_mode(
+                    progress.consecutive_success_count,
+                    progress.reorg_start_time,
+                )
+            {
+                self.checker.exit_reorg_mode()?;
+            }
 
             // Set status based on sync state
             let blocks_behind = target_block.saturating_sub(progress.current_block);
             progress.status = if blocks_behind > 10 {
-                "catching_up".to_string()
+                ScannerStatus::CatchingUp
             } else if blocks_behind > 0 {
-                "scanning".to_string()
+                ScannerStatus::Scanning
             } else {
-                "synced".to_string()
+                ScannerStatus::Synced
             };
 
             progress.updated_at = Utc::now();
@@ -296,15 +331,15 @@ impl EvmScanner {
             };
 
             info!(
-                "✅ Scanned {} blocks ({}) - Status: {} - Current: {}",
+                "✅ Scanned {} blocks ({}) - Status: {:?} - Current: {}",
                 scan_count, block_range, progress.status, progress.current_block
             );
         } else {
             // Already caught up
-            progress.status = "idle".to_string();
+            progress.status = ScannerStatus::Idle;
             progress.updated_at = Utc::now();
             self.storage_manager.progress.update(progress.clone())?;
-            info!("🔄 Already caught up - Status: {}", progress.status);
+            info!("🔄 Already caught up - Status: {:?}", progress.status);
         }
 
         Ok(progress)
@@ -320,7 +355,7 @@ impl EvmScanner {
         if let Some(network_latest) = final_progress.network_latest_block {
             info!("  └─ Network latest: {}", network_latest);
         }
-        info!("  └─ Status: {}", final_progress.status);
+        info!("  └─ Status: {:?}", final_progress.status);
         Ok(())
     }
 
@@ -367,6 +402,102 @@ impl EvmScanner {
         // Print final status after loop exits
         self.print_final_status()?;
         info!("👋 Scanner stopped gracefully");
+        Ok(())
+    }
+
+    /// Handle reorg detection
+    async fn handle_reorg_detection(&self, reorg_block: u64, rollback_depth: u64) -> Result<()> {
+        // Check for deep reorg
+        self.checker
+            .handle_deep_reorg(rollback_depth, reorg_block)?;
+
+        // Execute rollback
+        self.checker.handle_reorg(reorg_block)?;
+
+        // Enter reorg mode
+        self.checker.enter_reorg_mode(reorg_block)?;
+
+        info!(
+            "🔄 Reorg detected at block {}, entering reorg mode",
+            reorg_block
+        );
+
+        Ok(())
+    }
+
+    /// Handle continuity break
+    async fn handle_continuity_break(
+        &self,
+        broken_block: u64,
+        error_type: crate::chains::evm::checker::ContinuityError,
+    ) -> Result<()> {
+        error!(
+            "❌ Batch continuity broken at block {}: {:?}",
+            broken_block, error_type
+        );
+
+        // Don't save any data, wait for next scan
+        Ok(())
+    }
+
+    /// Handle validation error
+    async fn handle_validation_error(
+        &self,
+        message: String,
+        block_number: Option<u64>,
+    ) -> Result<()> {
+        error!(
+            "❌ Validation error{}: {}",
+            if let Some(block) = block_number {
+                format!(" at block {}", block)
+            } else {
+                String::new()
+            },
+            message
+        );
+
+        // Don't save any data, wait for next scan
+        Ok(())
+    }
+
+    /// Get scan concurrency based on current status
+    fn get_scan_concurrency(&self) -> Result<usize> {
+        let progress = self.storage_manager.progress.get()?;
+
+        match progress.status {
+            ScannerStatus::ReorgDetected => {
+                // Reorg mode: only single block scanning
+                debug!("Reorg detected mode: limiting concurrency to 1");
+                Ok(1)
+            }
+            ScannerStatus::Error => {
+                // Error state: no scanning allowed
+                Err(anyhow::anyhow!("Scanner is in error state"))
+            }
+            _ => {
+                // Normal mode: use configured concurrency
+                Ok(self.scanner_cfg.concurrency)
+            }
+        }
+    }
+
+    /// Check if service is running
+    #[allow(dead_code)]
+    fn is_service_running(&self) -> Result<bool> {
+        let progress = self.storage_manager.progress.get()?;
+
+        match progress.status {
+            ScannerStatus::Error => Ok(false),
+            _ => Ok(true),
+        }
+    }
+
+    /// Reset consecutive success count
+    fn reset_success_count(&self) -> Result<()> {
+        let mut progress = self.storage_manager.progress.get()?;
+        progress.consecutive_success_count = 0;
+        progress.updated_at = Utc::now();
+        self.storage_manager.progress.update(progress)?;
         Ok(())
     }
 }

@@ -1,4 +1,6 @@
-use crate::core::table::{BlockData, BlockIndex, BlockIndexHistory, ScannerProgress};
+use crate::core::table::{
+    BlockData, BlockIndex, BlockIndexHistory, ScannerProgress, ScannerStatus,
+};
 use crate::core::types::{EvmBlockData, EvmBlockReceipts};
 use crate::storage::schema::keys;
 use crate::storage::traits::KVStorage;
@@ -20,12 +22,15 @@ impl ScannerProgressStorage {
             current_block: start_block,
             target_block: start_block,
             network_latest_block: None,
-            status: "idle".to_string(),
+            status: ScannerStatus::Idle,
             updated_at: Utc::now(),
             reorg_block: None,
             finalized_block: None,
             min_block: None,
             version: crate::storage::schema::SCHEMA_VERSION,
+            reorg_count: 0,
+            consecutive_success_count: 0,
+            reorg_start_time: None,
         }
     }
 

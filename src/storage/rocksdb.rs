@@ -66,7 +66,7 @@ impl RocksDBStorage {
         opts.set_use_direct_io_for_flush_and_compaction(true); // direct I/O for compaction
         opts.set_allow_concurrent_memtable_write(true); // concurrent writes
         opts.set_enable_write_thread_adaptive_yield(true); // adaptive yielding
-        
+
         // 8. Large value optimizations
         opts.set_max_manifest_file_size(1024 * 1024 * 1024); // 1GB manifest file size
         opts.set_delete_obsolete_files_period_micros(21600000000); // 6 hours cleanup interval
