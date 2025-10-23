@@ -23,7 +23,7 @@ clap = { version = "4", features = ["derive"] }
 alloy = { version = "0.4", features = ["full"] }
 rocksdb = { version = "0.21", features = ["multi-threaded-cf"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "time", "chrono"] }
 tracing-appender = "0.2"
 tracing-log = "0.2"
 metrics = "0.21"

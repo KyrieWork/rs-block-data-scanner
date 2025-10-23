@@ -27,7 +27,12 @@ async fn main() -> Result<()> {
     );
 
     // Initialize logger system
-    init_logger(&cfg.logging.level, cfg.logging.to_file, &log_path);
+    init_logger(
+        &cfg.logging.level,
+        cfg.logging.to_file,
+        &log_path,
+        &cfg.logging.timezone,
+    );
 
     info!("✅ Configuration load successful");
     info!(chain = %cfg.scanner.chain_type, "Chain type configuration");

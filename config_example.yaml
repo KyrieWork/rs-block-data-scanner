@@ -151,6 +151,14 @@ logging:
   
   # Log file directory
   path: "./logs"
+  
+  # Timezone for log timestamps
+  # Supported values:
+  #   - "local" (default): Use system local time
+  #   - "utc": Use Coordinated Universal Time
+  #   - "UTC+8", "UTC-5": UTC offset format (e.g., UTC+8 for China Standard Time)
+  #   - "UTC+08:30": UTC offset with minutes (e.g., UTC+08:30 for India Standard Time)
+  timezone: "local"
 
 # ============================
 # Metrics Configuration

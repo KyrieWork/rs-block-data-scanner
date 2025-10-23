@@ -184,6 +184,8 @@ pub struct LoggingConfig {
     pub to_file: bool,
     #[serde(default = "LoggingConfig::default_path")]
     pub path: String,
+    #[serde(default = "LoggingConfig::default_timezone")]
+    pub timezone: String,
 }
 
 impl LoggingConfig {
@@ -195,6 +197,9 @@ impl LoggingConfig {
     }
     fn default_path() -> String {
         "./logs".to_string()
+    }
+    fn default_timezone() -> String {
+        "local".to_string()
     }
 }
 
