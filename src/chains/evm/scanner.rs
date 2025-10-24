@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use crate::{
     chains::evm::{
         checker::{BatchVerificationResult, EvmChecker},
-        cleaner::EvmCleaner,
+        cleaner::{CleanupResult, EvmCleaner},
         client::EvmClient,
     },
     config::ScannerConfig,
@@ -173,23 +173,25 @@ impl EvmScanner {
     }
 
     /// Batch save blocks and handle cleanup
-    async fn batch_save_blocks(&self, blocks: Vec<BlockData>) -> Result<()> {
+    async fn batch_save_blocks(&self, blocks: Vec<BlockData>) -> Result<Option<CleanupResult>> {
         if blocks.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
         let mut cleanup_keys = Vec::new();
+        let mut cleanup_result = None;
 
         // Check if we need cleanup based on data span
         let progress = self.storage_manager.progress.get()?;
         if let Some(min_block) = progress.min_block
             && progress.current_block - min_block >= self.scanner_cfg.cleanup_interval_blocks
         {
-            let cleanup_result = self.cleaner.get_cleanup_keys()?;
-            if !cleanup_result.is_empty() {
-                let total_keys = cleanup_result.total_keys();
-                cleanup_keys.extend(cleanup_result.keys_to_delete);
+            let get_cleanup_result = self.cleaner.get_cleanup_keys()?;
+            if !get_cleanup_result.is_empty() {
+                let total_keys = get_cleanup_result.total_keys();
+                cleanup_keys.extend(get_cleanup_result.keys_to_delete.clone());
                 info!("🧹 Cleanup: {} keys to delete", total_keys);
+                cleanup_result = Some(get_cleanup_result);
             }
         }
 
@@ -212,7 +214,7 @@ impl EvmScanner {
                 );
             }
         }
-        Ok(())
+        Ok(cleanup_result)
     }
 
     /// Scan next block(s) based on current state
@@ -295,12 +297,19 @@ impl EvmScanner {
             }
 
             // Save all blocks first
-            self.batch_save_blocks(blocks).await?;
+            let cleanup_result = self.batch_save_blocks(blocks).await?;
 
             // Update progress only after successful save
             let previous_block = progress.current_block;
             progress.current_block += scan_count as u64;
             progress.consecutive_success_count += 1;
+
+            // Update min_block if cleanup was performed
+            if let Some(cleanup) = cleanup_result
+                && let Some(min_block) = cleanup.new_min_block
+            {
+                progress.min_block = Some(min_block);
+            }
 
             // Check if should exit reorg mode
             if progress.status == ScannerStatus::ReorgDetected
