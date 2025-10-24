@@ -121,9 +121,6 @@ async fn main() -> Result<()> {
                 cfg.scanner.chain_name.clone(),
             ));
 
-            // Log current progress
-            storage_manager.progress.log_current_progress()?;
-
             // Create EVM client
             let client = Arc::new(EvmClient::new(&cfg.rpc.url)?);
 

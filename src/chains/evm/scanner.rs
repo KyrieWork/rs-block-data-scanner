@@ -51,6 +51,7 @@ impl EvmScanner {
                     existing_progress.current_block
                 );
                 info!("✅ Scanner initialized with existing progress");
+                self.storage_manager.progress.log_current_progress()?;
                 Ok(())
             }
             Err(_) => {
@@ -70,6 +71,7 @@ impl EvmScanner {
                     .get_initial_progress(start_block);
                 self.storage_manager.progress.update(progress)?;
                 info!("✅ Scanner initialized with start_block: {}", start_block);
+                self.storage_manager.progress.log_current_progress()?;
                 Ok(())
             }
         }
