@@ -7,6 +7,7 @@ use crate::storage::traits::KVStorage;
 use anyhow::Result;
 use chrono::Utc;
 use std::sync::Arc;
+use tracing::info;
 
 use super::rocksdb::RocksDBStorage;
 
@@ -26,7 +27,7 @@ impl ScannerProgressStorage {
             updated_at: Utc::now(),
             reorg_block: None,
             finalized_block: None,
-            min_block: None,
+            min_block: Some(start_block),
             version: crate::storage::schema::SCHEMA_VERSION,
             reorg_count: 0,
             consecutive_success_count: 0,
@@ -49,6 +50,12 @@ impl ScannerProgressStorage {
     pub fn delete(&self) -> Result<()> {
         let key = keys::progress_key(&self.chain);
         self.storage.delete(&key)
+    }
+
+    pub fn log_current_progress(&self) -> Result<()> {
+        let progress = self.get()?;
+        info!("🖨️ Current progress: {:?}", progress);
+        Ok(())
     }
 }
 
