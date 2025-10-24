@@ -183,8 +183,10 @@ impl EvmScanner {
 
         // Check if we need cleanup based on data span
         let progress = self.storage_manager.progress.get()?;
-        if let Some(min_block) = progress.min_block
-            && progress.current_block - min_block >= self.scanner_cfg.cleanup_interval_blocks
+        if let (Some(min_block), Some(retention_blocks)) =
+            (progress.min_block, self.scanner_cfg.retention_blocks)
+            && progress.current_block - min_block - retention_blocks
+                >= self.scanner_cfg.cleanup_interval_blocks
         {
             let get_cleanup_result = self.cleaner.get_cleanup_keys()?;
             if !get_cleanup_result.is_empty() {
