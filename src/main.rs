@@ -3,15 +3,16 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 use rs_block_data_scanner::{
-    chains::evm::{cleaner::EvmCleaner, scanner::EvmScanner},
+    chains::evm::{
+        checker::EvmChecker, cleaner::EvmCleaner, client::EvmClient, scanner::EvmScanner,
+    },
     cli::Cli,
     config::AppConfig,
-    core::{cleaner::Cleaner, scanner::Scanner},
-    storage::{rocksdb::RocksDBStorage, traits::KVStorage},
+    storage::{manager::ScannerStorageManager, rocksdb::RocksDBStorage, traits::KVStorage},
     utils::{format::format_size_bytes, logger::init_logger},
 };
 use tokio::sync::broadcast;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,13 +27,21 @@ async fn main() -> Result<()> {
     );
 
     // Initialize logger system
-    init_logger(&cfg.logging.level, cfg.logging.to_file, &log_path);
+    init_logger(
+        &cfg.logging.level,
+        cfg.logging.to_file,
+        &log_path,
+        &cfg.logging.timezone,
+    );
 
     info!("✅ Configuration load successful");
     info!(chain = %cfg.scanner.chain_type, "Chain type configuration");
     info!(chain_name = %cfg.scanner.chain_name, "Chain name");
     info!(start_block = cfg.scanner.start_block, "Start block number");
     info!(rpc_url = %cfg.rpc.url, "RPC node");
+
+    // Validate scanner configuration
+    cfg.scanner.validate()?;
 
     // Create shutdown channel
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
@@ -106,61 +115,50 @@ async fn main() -> Result<()> {
             info!("  └─ Base: {}", cfg.storage.path);
             info!("  └─ Chain: {}", cfg.scanner.chain_name);
 
+            // Create storage manager
+            let storage_manager = Arc::new(ScannerStorageManager::new(
+                storage.clone(),
+                cfg.scanner.chain_name.clone(),
+            ));
+
+            // Create EVM client
+            let client = Arc::new(EvmClient::new(&cfg.rpc.url)?);
+
+            // Create EVM checker
+            let checker = Arc::new(EvmChecker::new(
+                cfg.scanner.clone(),
+                storage_manager.progress.clone(),
+                storage_manager.block_index.clone(),
+                storage_manager.storage.clone(),
+            ));
+
+            // Create EVM cleaner
+            let cleaner = Arc::new(EvmCleaner::new(
+                cfg.scanner.clone(),
+                storage_manager.storage.clone(),
+            ));
+
             // Create EVM scanner
-            let scanner =
-                EvmScanner::new(cfg.scanner.clone(), cfg.rpc.url.clone(), storage.clone())?;
+            let scanner = EvmScanner::new(
+                cfg.scanner.clone(),
+                client,
+                storage_manager,
+                checker,
+                cleaner,
+            );
 
             // Initialize scanner
             scanner.init().await?;
 
-            // Spawn cleanup task if enabled
+            // Cleanup is integrated into scanner, no separate task needed
             if cfg.scanner.cleanup_enabled {
-                info!("🧹 Cleanup task enabled");
+                info!("🧹 Cleanup enabled - integrated into scanner");
                 info!("  └─ Retention blocks: {:?}", cfg.scanner.retention_blocks);
                 info!(
-                    "  └─ Cleanup interval: {}s",
-                    cfg.scanner.cleanup_interval_secs
+                    "  └─ Cleanup interval: {} blocks",
+                    cfg.scanner.cleanup_interval_blocks
                 );
                 info!("  └─ Batch size: {}", cfg.scanner.cleanup_batch_size);
-
-                let cleaner = EvmCleaner::new(cfg.scanner.clone(), storage.clone());
-                let cleanup_interval = cfg.scanner.cleanup_interval_secs;
-                let mut shutdown_rx_cleanup = shutdown_tx.subscribe();
-
-                tokio::spawn(async move {
-                    loop {
-                        tokio::select! {
-                            _ = shutdown_rx_cleanup.recv() => {
-                                info!("🧹 Cleanup task received shutdown signal");
-                                break;
-                            }
-                            _ = tokio::time::sleep(std::time::Duration::from_secs(cleanup_interval)) => {
-                                // Add timeout to cleanup operation to prevent hanging
-                                match tokio::time::timeout(
-                                    std::time::Duration::from_secs(30), // 30 second timeout
-                                    cleaner.cleanup()
-                                ).await {
-                                    Ok(Ok(count)) if count > 0 => {
-                                        info!("🧹 Cleanup cycle completed: {} blocks removed", count);
-                                    }
-                                    Ok(Ok(_)) => {
-                                        debug!("🧹 Cleanup cycle completed: no blocks to remove");
-                                    }
-                                    Ok(Err(e)) => {
-                                        warn!("⚠️ Cleanup failed: {}", e);
-                                    }
-                                    Err(_timeout) => {
-                                        warn!("⚠️ Cleanup operation timed out after 30 seconds");
-                                    }
-                                }
-
-                                // Print database size after cleanup (skip for now due to private field)
-                                // TODO: Add public method to get database size from cleaner
-                            }
-                        }
-                    }
-                    info!("🧹 Cleanup task stopped");
-                });
             }
 
             // Start scanning with shutdown support

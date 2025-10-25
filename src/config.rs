@@ -3,6 +3,7 @@ use config as config_loader;
 use dotenvy::dotenv;
 use serde::Deserialize;
 use std::path::Path;
+use tracing::info;
 
 /// Global config structure
 #[derive(Debug, Deserialize, Clone)]
@@ -50,8 +51,6 @@ pub struct ScannerConfig {
     pub start_block: u64,
     #[serde(default = "ScannerConfig::default_confirm_blocks")]
     pub confirm_blocks: u64,
-    #[serde(default = "ScannerConfig::default_realtime")]
-    pub realtime: bool,
     #[serde(default = "ScannerConfig::default_timeout_secs")]
     pub timeout_secs: u64,
 
@@ -60,18 +59,38 @@ pub struct ScannerConfig {
     pub cleanup_enabled: bool,
     #[serde(default)]
     pub retention_blocks: Option<u64>,
-    #[serde(default = "ScannerConfig::default_cleanup_interval_secs")]
-    pub cleanup_interval_secs: u64,
+    #[serde(default = "ScannerConfig::default_cleanup_interval_blocks")]
+    pub cleanup_interval_blocks: u64,
     #[serde(default = "ScannerConfig::default_cleanup_batch_size")]
     pub cleanup_batch_size: usize,
     #[serde(default = "ScannerConfig::default_cleanup_orphaned_enabled")]
     pub cleanup_orphaned_enabled: bool,
+
+    // Scan configuration
+    #[serde(default = "ScannerConfig::default_batch_save_size")]
+    pub batch_save_size: usize,
+    #[serde(default = "ScannerConfig::default_reorg_check_enabled")]
+    pub reorg_check_enabled: bool,
 
     // Scan interval configuration
     #[serde(default = "ScannerConfig::default_synced_interval_secs")]
     pub synced_interval_secs: u64,
     #[serde(default = "ScannerConfig::default_catching_up_interval_millis")]
     pub catching_up_interval_millis: u64,
+    #[serde(default = "ScannerConfig::default_error_interval_secs")]
+    pub error_interval_secs: u64,
+
+    // Reorg detection configuration
+    #[serde(default = "ScannerConfig::default_max_rollback_depth")]
+    pub max_rollback_depth: u64,
+    #[serde(default = "ScannerConfig::default_deep_reorg_confirmation_count")]
+    pub deep_reorg_confirmation_count: u32,
+    #[serde(default = "ScannerConfig::default_reorg_mode_exit_threshold")]
+    pub reorg_mode_exit_threshold: u64,
+    #[serde(default = "ScannerConfig::default_reorg_mode_exit_timeout")]
+    pub reorg_mode_exit_timeout: u64,
+    #[serde(default = "ScannerConfig::default_max_retry_count")]
+    pub max_retry_count: u32,
 }
 
 impl ScannerConfig {
@@ -84,17 +103,14 @@ impl ScannerConfig {
     fn default_confirm_blocks() -> u64 {
         10
     }
-    fn default_realtime() -> bool {
-        true
-    }
     fn default_timeout_secs() -> u64 {
         15
     }
     fn default_cleanup_enabled() -> bool {
         false
     }
-    fn default_cleanup_interval_secs() -> u64 {
-        3600 // 1 hour
+    fn default_cleanup_interval_blocks() -> u64 {
+        100 // Every 100 blocks
     }
     fn default_cleanup_batch_size() -> usize {
         1000
@@ -108,6 +124,55 @@ impl ScannerConfig {
     fn default_catching_up_interval_millis() -> u64 {
         10 // 10 milliseconds when catching up
     }
+    fn default_batch_save_size() -> usize {
+        50 // Save 50 blocks at a time
+    }
+    fn default_reorg_check_enabled() -> bool {
+        true
+    }
+    fn default_error_interval_secs() -> u64 {
+        1 // 1 second on error
+    }
+    fn default_max_rollback_depth() -> u64 {
+        100 // Maximum rollback depth
+    }
+    fn default_deep_reorg_confirmation_count() -> u32 {
+        3 // Confirm deep reorg after 3 detections
+    }
+    fn default_reorg_mode_exit_threshold() -> u64 {
+        5 // Exit reorg mode after 5 consecutive successes
+    }
+    fn default_reorg_mode_exit_timeout() -> u64 {
+        300 // 5 minutes timeout for reorg mode
+    }
+    fn default_max_retry_count() -> u32 {
+        3 // Maximum retry count for failed operations
+    }
+
+    /// Validate scanner configuration
+    pub fn validate(&self) -> Result<()> {
+        if self.start_block == 0 {
+            info!("⚠️ Start block is 0, scanner will start from the latest block");
+        }
+
+        if self.concurrency == 0 {
+            anyhow::bail!("Concurrency must be greater than 0");
+        }
+
+        if self.batch_save_size == 0 {
+            anyhow::bail!("Batch save size must be greater than 0");
+        }
+
+        if self.max_rollback_depth == 0 {
+            anyhow::bail!("Max rollback depth must be greater than 0");
+        }
+
+        if self.deep_reorg_confirmation_count == 0 {
+            anyhow::bail!("Deep reorg confirmation count must be greater than 0");
+        }
+
+        Ok(())
+    }
 }
 
 /// Logging config
@@ -119,6 +184,8 @@ pub struct LoggingConfig {
     pub to_file: bool,
     #[serde(default = "LoggingConfig::default_path")]
     pub path: String,
+    #[serde(default = "LoggingConfig::default_timezone")]
+    pub timezone: String,
 }
 
 impl LoggingConfig {
@@ -130,6 +197,9 @@ impl LoggingConfig {
     }
     fn default_path() -> String {
         "./logs".to_string()
+    }
+    fn default_timezone() -> String {
+        "local".to_string()
     }
 }
 

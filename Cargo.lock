@@ -3446,6 +3446,7 @@ dependencies = [
  "dotenvy",
  "metrics 0.21.1",
  "metrics-exporter-prometheus",
+ "once_cell",
  "rocksdb",
  "serde",
  "serde_json",
@@ -4400,6 +4401,7 @@ version = "0.3.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2054a14f5307d601f88daf0553e1cbf472acc4f2c51afab632431cdcd72124d5"
 dependencies = [
+ "chrono",
  "matchers",
  "nu-ansi-term",
  "once_cell",
@@ -4407,6 +4409,7 @@ dependencies = [
  "sharded-slab",
  "smallvec",
  "thread_local",
+ "time",
  "tracing",
  "tracing-core",
  "tracing-log",

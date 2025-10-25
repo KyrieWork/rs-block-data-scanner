@@ -25,6 +25,10 @@ pub mod keys {
         )
     }
 
+    pub fn block_index_history_prefix(chain: &str, block_number: u64) -> String {
+        format!("{}:{}:{}", chain, BLOCK_INDEX_HISTORY_PREFIX, block_number)
+    }
+
     // example: ethereum:block_data:0x1234567890
     pub fn block_data_key(chain: &str, block_hash: &str) -> String {
         format!("{}:{}:{}", chain, BLOCK_DATA_PREFIX, block_hash)
