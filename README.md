@@ -129,13 +129,13 @@ Key configuration groups:
 ./target/release/rs-block-data-scanner --config config.yaml
 
 # Or use the startup script
-./start.sh
+./scripts/start_scanner.sh
 ```
 
 ### 5. Monitoring
 
 - View logs: `tail -f logs/<chain_name>.scanner.log`
-- Stop service: `./stop.sh`
+- Stop service: `./scripts/stop_scanner.sh`
 - Monitor metrics: Visit `http://localhost:9100/metrics` (if `metrics.enable = true`)
 
 ## Configuration
@@ -215,3 +215,17 @@ make verify
 ## Contributing
 
 Issues and Pull Requests are welcome to improve the project.
+### API Service
+
+The API binary (`api_main`) shares the same configuration file and reads data from RocksDB in read-only mode. Scanner 与 API 可同时运行。
+
+```bash
+# Start API service
+./scripts/start_api.sh
+
+# Stop API service
+./scripts/stop_api.sh
+
+# Query kv endpoint
+curl "http://localhost:9001/kv/bsc:block_data:<block_hash>"
+```
