@@ -13,7 +13,9 @@ RS Block Data Scanner is a professional blockchain data collection tool designed
 - **Real-time Scanning**: Supports real-time block scanning and historical data backfill
 - **Reorganization Detection**: Intelligent detection and handling of blockchain reorganization events
 - **Data Cleanup**: Configurable automatic data cleanup mechanisms
-- **Monitoring Metrics**: Integrated Prometheus metrics export
+- **Smart RPC Failover**: Primary endpoint first, automatic fallback to backups with lightweight health probes
+- **Dynamic Concurrency Control**: Tokio semaphore limits concurrent RPC calls to the configured concurrency
+- **Monitoring Metrics**: Integrated Prometheus metrics export controllable via configuration
 - **Graceful Shutdown**: Signal handling and graceful shutdown support
 
 ## Project Structure
@@ -47,7 +49,7 @@ rs-block-data-scanner/
     │   └── evm/                    # EVM-compatible chain support
     │       ├── mod.rs
     │       ├── client.rs           # RPC client
-    │       ├── scanner.rs          # EVM scanner implementation
+    │       ├── scanner.rs          # EVM scanner implementation (metrics + concurrency control)
     │       ├── checker.rs          # Data validator
     │       └── cleaner.rs          # EVM data cleaner
     │
@@ -61,6 +63,7 @@ rs-block-data-scanner/
     └── utils/                      # Utility modules
         ├── mod.rs
         ├── logger.rs               # Logging utilities
+        ├── metrics.rs              # Metrics abstraction (Prometheus / no-op)
         └── format.rs               # Formatting utilities
 ```
 
@@ -109,12 +112,15 @@ Copy the configuration file and modify the relevant settings:
 cp config_example.yaml config.yaml
 ```
 
-Main configuration items:
-- `scanner.chain_name`: Chain name (e.g., "ethereum", "bsc")
-- `scanner.start_block`: Starting block number (0 means start from the latest block)
-- `rpc.url`: RPC node URL
+Key configuration groups:
+
+- `scanner.*`: Chain metadata, concurrency, clean-up behaviour and reorg thresholds
+- `rpc.url`: Primary RPC endpoint (required)
+- `rpc.backups`: Optional list of backup endpoints; each request starts from the primary and fails over only when necessary
 - `storage.path`: Data storage path
-- `logging.level`: Log level
+- `logging.*`: Log level, log directory and timezone
+- `metrics.enable`: Enable/disable Prometheus exporter
+- `metrics.prometheus_exporter_port`: Exporter listen port (default `9100`)
 
 ### 4. Run
 
@@ -130,7 +136,7 @@ Main configuration items:
 
 - View logs: `tail -f logs/<chain_name>.scanner.log`
 - Stop service: `./stop.sh`
-- Monitor metrics: Visit `http://localhost:9100/metrics`
+- Monitor metrics: Visit `http://localhost:9100/metrics` (if `metrics.enable = true`)
 
 ## Configuration
 
@@ -141,7 +147,7 @@ The project supports rich configuration options, including:
 - **Data Cleanup**: Automatic cleanup, retention policy, cleanup interval
 - **Storage Configuration**: Compression, column families, WAL settings
 - **Logging Configuration**: Level, file output, timezone settings
-- **Monitoring Configuration**: Prometheus export port
+- **Monitoring Configuration**: Enable switch, Prometheus export port
 
 For detailed configuration instructions, please refer to the `config_example.yaml` file.
 
@@ -162,10 +168,20 @@ Stored data includes:
 
 ## Performance Features
 
-- **High Concurrency**: Supports multi-threaded concurrent scanning
+- **High Concurrency**: Supports multi-threaded concurrent scanning with semaphore-based rate limiting
 - **Memory Optimization**: Memory usage optimization for large block data
-- **Network Optimization**: Intelligent retry and error handling
+- **Network Optimization**: Intelligent retry, RPC health probes and automatic failover
 - **Storage Optimization**: RocksDB parameter tuning for large-scale data storage
+
+## Testing
+
+Integration and unit tests can be executed with:
+
+```bash
+make verify
+```
+
+This includes the reorg integration test located at `tests/evm_reorg.rs`, which exercises rollback safety guards.
 
 ## Development Guide
 
@@ -199,4 +215,3 @@ make verify
 ## Contributing
 
 Issues and Pull Requests are welcome to improve the project.
-

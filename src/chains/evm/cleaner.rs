@@ -2,11 +2,12 @@ use anyhow::Result;
 use tracing::{debug, info};
 
 use crate::{
+    chains::evm::context::EvmScannerContext,
     config::ScannerConfig,
     core::table::{BlockIndex, ScannerProgress},
     storage::{rocksdb::RocksDBStorage, schema::keys, traits::KVStorage},
 };
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
 
 /// Cleanup result containing keys to be deleted
 #[derive(Debug, Clone, Default)]
@@ -34,27 +35,35 @@ impl CleanupResult {
 }
 
 pub struct EvmCleaner {
-    scanner_cfg: ScannerConfig,
-    storage: Arc<RocksDBStorage>,
+    context: EvmScannerContext,
 }
 
 impl EvmCleaner {
-    pub fn new(scanner_cfg: ScannerConfig, storage: Arc<RocksDBStorage>) -> Self {
-        Self {
-            scanner_cfg,
-            storage,
-        }
+    pub fn new(context: EvmScannerContext) -> Self {
+        Self { context }
+    }
+
+    fn cfg(&self) -> &ScannerConfig {
+        self.context.config.as_ref()
+    }
+
+    fn storage(&self) -> &RocksDBStorage {
+        self.context.storage_manager.storage.as_ref()
+    }
+
+    fn chain_name(&self) -> &str {
+        self.cfg().chain_name.as_str()
     }
     /// Check if cleanup should be performed and return keys to delete
     /// Returns empty result if cleanup is not needed
     pub fn get_cleanup_keys(&self) -> Result<CleanupResult> {
         // Check if cleanup is enabled
-        if !self.scanner_cfg.cleanup_enabled {
+        if !self.cfg().cleanup_enabled {
             debug!("Cleanup is disabled, skipping");
             return Ok(CleanupResult::new());
         }
 
-        let retention_blocks = match self.scanner_cfg.retention_blocks {
+        let retention_blocks = match self.cfg().retention_blocks {
             Some(blocks) if blocks > 0 => blocks,
             _ => {
                 debug!("No retention_blocks configured, skipping cleanup");
@@ -63,8 +72,8 @@ impl EvmCleaner {
         };
 
         // Read progress (includes min_block)
-        let progress_key = keys::progress_key(&self.scanner_cfg.chain_name);
-        let progress: ScannerProgress = match self.storage.read_json(&progress_key)? {
+        let progress_key = keys::progress_key(self.cfg().chain_name.as_str());
+        let progress: ScannerProgress = match self.storage().read_json(&progress_key)? {
             Some(p) => p,
             None => {
                 debug!("No progress found, skipping cleanup");
@@ -86,7 +95,7 @@ impl EvmCleaner {
         let cleanup_threshold = current_block - retention_blocks;
 
         // Get min_block from progress (or use start_block as fallback)
-        let min_stored_block = progress.min_block.unwrap_or(self.scanner_cfg.start_block);
+        let min_stored_block = progress.min_block.unwrap_or(self.cfg().start_block);
 
         if cleanup_threshold <= min_stored_block {
             debug!(
@@ -106,7 +115,7 @@ impl EvmCleaner {
         result.new_min_block = Some(cleanup_threshold);
 
         // Optionally get keys for orphaned data cleanup
-        if self.scanner_cfg.cleanup_orphaned_enabled {
+        if self.cfg().cleanup_orphaned_enabled {
             let orphaned_keys = self.get_orphaned_data_keys()?;
             result.keys_to_delete.extend(orphaned_keys);
         } else {
@@ -131,7 +140,7 @@ impl EvmCleaner {
     /// Returns keys for both indexes and data that should be deleted
     fn get_expired_blocks_keys(&self, min_block: u64, max_block: u64) -> Result<CleanupResult> {
         let mut result = CleanupResult::new();
-        let batch_size = self.scanner_cfg.cleanup_batch_size;
+        let batch_size = self.cfg().cleanup_batch_size;
 
         info!(
             "🧹 Analyzing expired blocks {}-{}",
@@ -161,10 +170,9 @@ impl EvmCleaner {
 
         // Step 1: Get hashes from active indexes for the block range
         for block_number in start_block..end_block {
-            let active_key =
-                keys::block_index_active_key(&self.scanner_cfg.chain_name, block_number);
+            let active_key = keys::block_index_active_key(self.chain_name(), block_number);
 
-            if let Some(index_json) = self.storage.read(&active_key)?
+            if let Some(index_json) = self.storage().read(&active_key)?
                 && let Ok(index) = serde_json::from_str::<BlockIndex>(&index_json)
             {
                 hashes_to_clean.push(index.block_hash.clone());
@@ -175,10 +183,10 @@ impl EvmCleaner {
         // Step 2: Get hashes from history indexes for the block range
         let history_prefix = format!(
             "{}:{}:",
-            self.scanner_cfg.chain_name,
+            self.chain_name(),
             keys::BLOCK_INDEX_HISTORY_PREFIX
         );
-        let history_results = self.storage.scan_prefix(&history_prefix, None)?;
+        let history_results = self.storage().scan_prefix(&history_prefix, None)?;
 
         for (key, value) in history_results {
             if let Some(block_number) = self.extract_block_number_from_history_key(&key)
@@ -193,10 +201,9 @@ impl EvmCleaner {
 
         // Step 3: Prepare data keys for deletion based on collected hashes
         for hash in &hashes_to_clean {
-            let block_data_key = keys::block_data_key(&self.scanner_cfg.chain_name, hash);
-            let block_receipts_key = keys::block_receipts_key(&self.scanner_cfg.chain_name, hash);
-            let block_debug_trace_key =
-                keys::block_debug_trace_key(&self.scanner_cfg.chain_name, hash);
+            let block_data_key = keys::block_data_key(self.chain_name(), hash);
+            let block_receipts_key = keys::block_receipts_key(self.chain_name(), hash);
+            let block_debug_trace_key = keys::block_debug_trace_key(self.chain_name(), hash);
             keys_to_delete.push(block_data_key.into_bytes());
             keys_to_delete.push(block_receipts_key.into_bytes());
             keys_to_delete.push(block_debug_trace_key.into_bytes());
@@ -211,12 +218,8 @@ impl EvmCleaner {
         let active_hashes = self.build_active_hash_set()?;
 
         // Scan all block data
-        let block_data_prefix = format!(
-            "{}:{}:",
-            self.scanner_cfg.chain_name,
-            keys::BLOCK_DATA_PREFIX
-        );
-        let block_data_results = self.storage.scan_prefix(&block_data_prefix, None)?;
+        let block_data_prefix = format!("{}:{}:", self.chain_name(), keys::BLOCK_DATA_PREFIX);
+        let block_data_results = self.storage().scan_prefix(&block_data_prefix, None)?;
         let mut keys_to_delete = Vec::new();
 
         for (key, _) in block_data_results {
@@ -227,13 +230,12 @@ impl EvmCleaner {
                     keys_to_delete.push(key.into_bytes());
 
                     // Also delete corresponding receipts
-                    let receipts_key =
-                        keys::block_receipts_key(&self.scanner_cfg.chain_name, &block_hash);
+                    let receipts_key = keys::block_receipts_key(self.chain_name(), &block_hash);
                     keys_to_delete.push(receipts_key.into_bytes());
 
                     // Also delete corresponding trace logs
                     let debug_trace_key =
-                        keys::block_debug_trace_key(&self.scanner_cfg.chain_name, &block_hash);
+                        keys::block_debug_trace_key(self.chain_name(), &block_hash);
                     keys_to_delete.push(debug_trace_key.into_bytes());
                 }
             }
@@ -249,12 +251,8 @@ impl EvmCleaner {
     /// Build active hash set for quick lookup
     fn build_active_hash_set(&self) -> Result<HashSet<String>> {
         let mut active_hashes = HashSet::new();
-        let active_prefix = format!(
-            "{}:{}:",
-            self.scanner_cfg.chain_name,
-            keys::BLOCK_INDEX_ACTIVE_PREFIX
-        );
-        let results = self.storage.scan_prefix(&active_prefix, None)?;
+        let active_prefix = format!("{}:{}:", self.chain_name(), keys::BLOCK_INDEX_ACTIVE_PREFIX);
+        let results = self.storage().scan_prefix(&active_prefix, None)?;
 
         for (_, value) in results {
             if let Ok(index) = serde_json::from_str::<BlockIndex>(&value) {
@@ -271,10 +269,9 @@ impl EvmCleaner {
 
         // Count from active indexes
         for block_number in min_block..max_block {
-            let active_key =
-                keys::block_index_active_key(&self.scanner_cfg.chain_name, block_number);
+            let active_key = keys::block_index_active_key(self.chain_name(), block_number);
 
-            if let Some(index_json) = self.storage.read(&active_key)?
+            if let Some(index_json) = self.storage().read(&active_key)?
                 && let Ok(index) = serde_json::from_str::<BlockIndex>(&index_json)
             {
                 unique_hashes.insert(index.block_hash);
@@ -284,10 +281,10 @@ impl EvmCleaner {
         // Count from history indexes
         let history_prefix = format!(
             "{}:{}:",
-            self.scanner_cfg.chain_name,
+            self.chain_name(),
             keys::BLOCK_INDEX_HISTORY_PREFIX
         );
-        let history_results = self.storage.scan_prefix(&history_prefix, None)?;
+        let history_results = self.storage().scan_prefix(&history_prefix, None)?;
 
         for (key, value) in history_results {
             if let Some(block_number) = self.extract_block_number_from_history_key(&key)

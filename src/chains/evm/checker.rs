@@ -1,18 +1,13 @@
 use crate::{
+    chains::evm::context::EvmScannerContext,
     config::ScannerConfig,
     core::table::{BlockData, ScannerStatus},
     storage::manager::{ScannerBlockIndexStorage, ScannerProgressStorage},
-    storage::rocksdb::RocksDBStorage,
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde_json::Value;
-use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
-
-/// Maximum number of blocks to rollback during reorg detection
-const MAX_REORG_DEPTH: u64 = 100;
 
 /// Batch verification result enumeration
 #[derive(Debug, Clone)]
@@ -105,42 +100,42 @@ impl ValidationError {
 }
 
 pub struct EvmChecker {
-    pub scanner_cfg: ScannerConfig,
-    pub progress: Arc<ScannerProgressStorage>,
-    pub index: Arc<ScannerBlockIndexStorage>,
-    pub storage: Arc<RocksDBStorage>,
+    context: EvmScannerContext,
 }
 
 impl EvmChecker {
-    pub fn new(
-        scanner_cfg: ScannerConfig,
-        progress: Arc<ScannerProgressStorage>,
-        index: Arc<ScannerBlockIndexStorage>,
-        storage: Arc<RocksDBStorage>,
-    ) -> Self {
-        Self {
-            scanner_cfg,
-            progress,
-            index,
-            storage,
-        }
+    pub fn new(context: EvmScannerContext) -> Self {
+        Self { context }
+    }
+
+    fn cfg(&self) -> &ScannerConfig {
+        self.context.config.as_ref()
+    }
+
+    fn progress_store(&self) -> &ScannerProgressStorage {
+        self.context.storage_manager.progress.as_ref()
+    }
+
+    fn index_store(&self) -> &ScannerBlockIndexStorage {
+        self.context.storage_manager.block_index.as_ref()
     }
 
     /// Verify if a reorg has occurred by comparing parent hash
     /// Returns true if no reorg detected, false if reorg detected
     pub fn verify_reorg(&self, parent_hash: &str, block_number: u64) -> Result<bool> {
         // Skip reorg check for start_block or earlier
-        if block_number <= self.scanner_cfg.start_block {
+        if block_number <= self.cfg().start_block {
             debug!(
                 "Skipping reorg check: block_number {} <= start_block {}",
-                block_number, self.scanner_cfg.start_block
+                block_number,
+                self.cfg().start_block
             );
             return Ok(true);
         }
 
         // Retrieve the hash of the previous block from the active index
         let prev_block_number = block_number - 1;
-        let prev_block_index = self.index.get_active(prev_block_number).ok();
+        let prev_block_index = self.index_store().get_active(prev_block_number).ok();
 
         let prev_block_index = match prev_block_index {
             Some(index) => index,
@@ -168,29 +163,31 @@ impl EvmChecker {
 
     /// Handle reorg by updating block index and progress
     pub fn handle_reorg(&self, block_number: u64) -> Result<()> {
-        let progress = self.progress.get()?;
+        let progress = self.progress_store().get()?;
         let rollback_block = block_number - 1;
 
         // Check rollback depth limit
         let rollback_depth = progress.current_block.saturating_sub(rollback_block);
-        if rollback_depth >= MAX_REORG_DEPTH {
+        let max_depth = self.cfg().max_rollback_depth;
+        if rollback_depth >= max_depth {
             return Err(anyhow::anyhow!(
-                "Reorg depth exceeds maximum limit ({}). Rollback stopped at block {}",
-                MAX_REORG_DEPTH,
+                "Reorg depth {} exceeds configured max rollback depth {} (rollback target block {})",
+                rollback_depth,
+                max_depth,
                 rollback_block
             ));
         }
 
         // Check if rollback would go before start_block
-        if rollback_block <= self.scanner_cfg.start_block {
+        if rollback_block <= self.cfg().start_block {
             return Err(anyhow::anyhow!(
                 "Cannot rollback before start_block ({})",
-                self.scanner_cfg.start_block
+                self.cfg().start_block
             ));
         }
 
         // Move active index to history
-        self.index.active_move_to_history(rollback_block)?;
+        self.index_store().active_move_to_history(rollback_block)?;
 
         // Update progress
         let current_block = progress.current_block;
@@ -208,14 +205,14 @@ impl EvmChecker {
 
     /// Update progress to reflect rollback state
     pub fn update_back_progress(&self, current_block: u64, reorg_block: Option<u64>) -> Result<()> {
-        let mut progress = self.progress.get()?;
+        let mut progress = self.progress_store().get()?;
 
         progress.current_block = current_block;
         progress.status = ScannerStatus::ReorgDetected;
         progress.reorg_block = reorg_block;
         progress.updated_at = Utc::now();
 
-        self.progress.update(progress)?;
+        self.progress_store().update(progress)?;
 
         debug!(
             "📝 Updated progress after reorg - current: {}, reorg_block: {:?}",
@@ -243,7 +240,7 @@ impl EvmChecker {
         }
 
         // 2. Verify internal continuity within batch
-        let internal_continuity = self.verify_internal_continuity(blocks, start_block)?;
+        let internal_continuity = self.verify_internal_continuity(blocks)?;
         if !matches!(internal_continuity, BatchVerificationResult::Valid) {
             return Ok(internal_continuity);
         }
@@ -257,15 +254,22 @@ impl EvmChecker {
         first_block: &BlockData,
         start_block: u64,
     ) -> Result<BatchVerificationResult> {
-        if start_block <= self.scanner_cfg.start_block {
+        if start_block <= self.cfg().start_block {
             return Ok(BatchVerificationResult::Valid);
         }
 
-        let parent_hash = self.extract_parent_hash(first_block)?;
+        if first_block.block_number != start_block {
+            return Ok(BatchVerificationResult::ContinuityBroken {
+                broken_block: first_block.block_number,
+                error_type: ContinuityError::BlockNumberGap,
+            });
+        }
+
+        let parent_hash = first_block.parent_hash.clone();
         let prev_block_number = start_block - 1;
 
         // Get previous block from database
-        let prev_block_index = self.index.get_active(prev_block_number).ok();
+        let prev_block_index = self.index_store().get_active(prev_block_number).ok();
         let prev_block_index = match prev_block_index {
             Some(index) => index,
             None => {
@@ -297,21 +301,17 @@ impl EvmChecker {
     }
 
     /// Verify internal continuity within batch
-    fn verify_internal_continuity(
-        &self,
-        blocks: &[BlockData],
-        start_block: u64,
-    ) -> Result<BatchVerificationResult> {
+    fn verify_internal_continuity(&self, blocks: &[BlockData]) -> Result<BatchVerificationResult> {
         if blocks.len() <= 1 {
             return Ok(BatchVerificationResult::Valid);
         }
 
         // Check for duplicate block hashes
         let mut seen_hashes = std::collections::HashSet::new();
-        for (i, block) in blocks.iter().enumerate() {
+        for block in blocks {
             if !seen_hashes.insert(&block.hash) {
                 return Ok(BatchVerificationResult::ContinuityBroken {
-                    broken_block: start_block + i as u64,
+                    broken_block: block.block_number,
                     error_type: ContinuityError::DuplicateBlockHash,
                 });
             }
@@ -321,12 +321,16 @@ impl EvmChecker {
         for i in 1..blocks.len() {
             let current_block = &blocks[i];
             let prev_block = &blocks[i - 1];
-            let current_block_number = start_block + i as u64;
+            let current_block_number = current_block.block_number;
 
-            let current_parent_hash = self.extract_parent_hash(current_block)?;
-            let prev_block_hash = &prev_block.hash;
+            if current_block_number != prev_block.block_number + 1 {
+                return Ok(BatchVerificationResult::ContinuityBroken {
+                    broken_block: current_block_number,
+                    error_type: ContinuityError::BlockNumberGap,
+                });
+            }
 
-            if &current_parent_hash != prev_block_hash {
+            if current_block.parent_hash != prev_block.hash {
                 return Ok(BatchVerificationResult::ContinuityBroken {
                     broken_block: current_block_number,
                     error_type: ContinuityError::ParentHashMismatch,
@@ -337,26 +341,9 @@ impl EvmChecker {
         Ok(BatchVerificationResult::Valid)
     }
 
-    /// Extract parent hash from block data
-    fn extract_parent_hash(&self, block_data: &BlockData) -> Result<String> {
-        let block: Value = serde_json::from_str(&block_data.block_data_json)?;
-
-        let parent_hash = if let Some(parent) = block["header"]["parent_hash"].as_str() {
-            parent.to_string()
-        } else if let Some(parent) = block["parentHash"].as_str() {
-            parent.to_string()
-        } else {
-            return Err(anyhow::anyhow!(
-                "Failed to parse parentHash from block data"
-            ));
-        };
-
-        Ok(parent_hash)
-    }
-
     /// Enter reorg mode
     pub fn enter_reorg_mode(&self, reorg_block: u64) -> Result<()> {
-        let mut progress = self.progress.get()?;
+        let mut progress = self.progress_store().get()?;
 
         progress.status = ScannerStatus::ReorgDetected;
         progress.reorg_count += 1;
@@ -366,7 +353,7 @@ impl EvmChecker {
         progress.updated_at = Utc::now();
 
         let reorg_count = progress.reorg_count;
-        self.progress.update(progress)?;
+        self.progress_store().update(progress)?;
 
         warn!(
             "🔄 Entering reorg mode: block {}, reorg count: {}",
@@ -378,14 +365,14 @@ impl EvmChecker {
 
     /// Exit reorg mode
     pub fn exit_reorg_mode(&self) -> Result<()> {
-        let mut progress = self.progress.get()?;
+        let mut progress = self.progress_store().get()?;
 
         progress.status = ScannerStatus::Scanning;
         progress.reorg_block = None;
         progress.reorg_start_time = None;
         progress.updated_at = Utc::now();
 
-        self.progress.update(progress)?;
+        self.progress_store().update(progress)?;
 
         info!("✅ Exited reorg mode, resuming normal operation");
 
@@ -399,14 +386,14 @@ impl EvmChecker {
         reorg_start_time: Option<DateTime<Utc>>,
     ) -> bool {
         // Check consecutive success count
-        if consecutive_success_count >= self.scanner_cfg.reorg_mode_exit_threshold {
+        if consecutive_success_count >= self.cfg().reorg_mode_exit_threshold {
             return true;
         }
 
         // Check reorg mode timeout
         if let Some(start_time) = reorg_start_time {
             let duration = Utc::now().signed_duration_since(start_time);
-            if duration.num_seconds() > self.scanner_cfg.reorg_mode_exit_timeout as i64 {
+            if duration.num_seconds() > self.cfg().reorg_mode_exit_timeout as i64 {
                 warn!("Reorg mode timeout, forcing exit");
                 return true;
             }
@@ -417,17 +404,16 @@ impl EvmChecker {
 
     /// Handle deep reorg detection
     pub fn handle_deep_reorg(&self, rollback_depth: u64, reorg_block: u64) -> Result<()> {
-        if rollback_depth >= self.scanner_cfg.max_rollback_depth {
-            error!(
-                "🚨 CRITICAL: Reorg depth {} exceeds maximum limit {}. Terminating service.",
-                rollback_depth, self.scanner_cfg.max_rollback_depth
+        if rollback_depth >= self.cfg().max_rollback_depth {
+            let message = format!(
+                "Reorg depth {} exceeds maximum rollback depth {} at block {}",
+                rollback_depth,
+                self.cfg().max_rollback_depth,
+                reorg_block
             );
-
-            // Record shutdown reason
+            error!("🚨 CRITICAL: {message}");
             self.record_shutdown_reason("Deep reorg detected", reorg_block)?;
-
-            // Terminate service
-            std::process::exit(1);
+            return Err(anyhow::anyhow!(message));
         }
 
         Ok(())
@@ -435,7 +421,10 @@ impl EvmChecker {
 
     /// Record shutdown reason
     fn record_shutdown_reason(&self, reason: &str, block_number: u64) -> Result<()> {
-        error!("🛑 Service shutdown: {} at block {}", reason, block_number);
+        error!(
+            "🛑 Critical scanner fault: {} at block {}",
+            reason, block_number
+        );
         Ok(())
     }
 }

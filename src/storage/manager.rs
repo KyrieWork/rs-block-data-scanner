@@ -234,38 +234,12 @@ impl ScannerStorageManager {
         // Prepare block indexes
         let mut indexes = Vec::new();
         for block_data in &blocks {
-            // Parse block data to get block number and parent hash
-            let block: serde_json::Value = serde_json::from_str(&block_data.block_data_json)?;
-            let block_number = if let Some(number_str) = block["header"]["number"].as_str() {
-                if let Some(stripped) = number_str.strip_prefix("0x") {
-                    u64::from_str_radix(stripped, 16)?
-                } else {
-                    number_str.parse::<u64>()?
-                }
-            } else if let Some(number_str) = block["number"].as_str() {
-                if let Some(stripped) = number_str.strip_prefix("0x") {
-                    u64::from_str_radix(stripped, 16)?
-                } else {
-                    number_str.parse::<u64>()?
-                }
-            } else {
-                return Err(anyhow::anyhow!("Failed to parse block number"));
-            };
-
-            let parent_hash = if let Some(parent) = block["header"]["parent_hash"].as_str() {
-                parent.to_string()
-            } else if let Some(parent) = block["parentHash"].as_str() {
-                parent.to_string()
-            } else {
-                return Err(anyhow::anyhow!("Failed to parse parentHash"));
-            };
-
             let index = BlockIndex {
                 block_hash: block_data.hash.clone(),
-                parent_hash,
+                parent_hash: block_data.parent_hash.clone(),
                 created_at: Utc::now(),
             };
-            indexes.push((block_number, index));
+            indexes.push((block_data.block_number, index));
         }
 
         // Get chain name from progress storage

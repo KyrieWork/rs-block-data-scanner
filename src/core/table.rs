@@ -109,6 +109,8 @@ pub struct BlockIndexHistory {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BlockData {
     pub hash: String,
+    pub block_number: u64,
+    pub parent_hash: String,
     pub block_data_json: String,
     pub block_receipts_json: String,
     pub debug_trace_block_json: String,

@@ -1,77 +1,92 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crate::{
     chains::evm::{
         checker::{BatchVerificationResult, EvmChecker},
         cleaner::{CleanupResult, EvmCleaner},
         client::EvmClient,
+        context::EvmScannerContext,
     },
     config::ScannerConfig,
     core::table::{BlockData, ScannerProgress, ScannerStatus},
     storage::manager::ScannerStorageManager,
+    utils::metrics::{BlockFetchFailureReason, ScannerMetrics},
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use tokio::sync::broadcast;
+use tokio::task;
 use tokio::time::timeout;
 use tracing::{debug, error, info};
 
 pub struct EvmScanner {
-    pub scanner_cfg: ScannerConfig,
+    context: EvmScannerContext,
     pub client: Arc<EvmClient>,
-    pub storage_manager: Arc<ScannerStorageManager>,
     pub checker: Arc<EvmChecker>,
     pub cleaner: Arc<EvmCleaner>,
 }
 
 impl EvmScanner {
     pub fn new(
-        scanner_cfg: ScannerConfig,
+        context: EvmScannerContext,
         client: Arc<EvmClient>,
-        storage_manager: Arc<ScannerStorageManager>,
         checker: Arc<EvmChecker>,
         cleaner: Arc<EvmCleaner>,
     ) -> Self {
         Self {
-            scanner_cfg,
+            context,
             client,
-            storage_manager,
             checker,
             cleaner,
         }
     }
 
+    fn cfg(&self) -> &ScannerConfig {
+        self.context.config.as_ref()
+    }
+
+    fn storage_manager(&self) -> &ScannerStorageManager {
+        self.context.storage_manager.as_ref()
+    }
+
+    fn metrics(&self) -> &dyn ScannerMetrics {
+        self.context.metrics.as_ref()
+    }
+
     /// Initialize scanner progress
     pub async fn init(&self) -> Result<()> {
         // Check if progress already exists
-        match self.storage_manager.progress.get() {
+        match self.storage_manager().progress.get() {
             Ok(existing_progress) => {
                 info!(
                     "📊 Found existing progress, continuing from block: {}",
                     existing_progress.current_block
                 );
                 info!("✅ Scanner initialized with existing progress");
-                self.storage_manager.progress.log_current_progress()?;
+                self.storage_manager().progress.log_current_progress()?;
                 Ok(())
             }
             Err(_) => {
                 // No existing progress, initialize with start_block
-                let start_block = if self.scanner_cfg.start_block == 0 {
+                let start_block = if self.cfg().start_block == 0 {
                     // If start_block is 0, start from the latest block
                     let latest_block = self.client.get_latest_block_number().await?;
                     info!("🚀 Start block is 0, using latest block: {}", latest_block);
                     latest_block
                 } else {
-                    self.scanner_cfg.start_block
+                    self.cfg().start_block
                 };
 
                 let progress = self
-                    .storage_manager
+                    .storage_manager()
                     .progress
                     .get_initial_progress(start_block);
-                self.storage_manager.progress.update(progress)?;
+                self.storage_manager().progress.update(progress)?;
                 info!("✅ Scanner initialized with start_block: {}", start_block);
-                self.storage_manager.progress.log_current_progress()?;
+                self.storage_manager().progress.log_current_progress()?;
                 Ok(())
             }
         }
@@ -79,11 +94,11 @@ impl EvmScanner {
 
     /// Get target block and network latest block
     async fn get_target_block(&self) -> Result<(u64, u64)> {
-        let progress = self.storage_manager.progress.get()?;
+        let progress = self.storage_manager().progress.get()?;
         let latest_block = self.client.get_latest_block_number().await?;
 
         // Calculate safe target block: latest_block - confirm_blocks
-        let safe_target = latest_block.saturating_sub(self.scanner_cfg.confirm_blocks);
+        let safe_target = latest_block.saturating_sub(self.cfg().confirm_blocks);
 
         // Target block should be at least current_block (never go backward)
         let target_block = safe_target.max(progress.current_block);
@@ -94,15 +109,15 @@ impl EvmScanner {
     /// Check if scanner is synced with the network
     fn is_synced(&self, current_block: u64, network_latest_block: u64) -> bool {
         let gap = network_latest_block.saturating_sub(current_block);
-        gap <= self.scanner_cfg.confirm_blocks
+        gap <= self.cfg().confirm_blocks
     }
 
     /// Get dynamic scan interval based on sync status
     fn get_scan_interval(&self, current_block: u64, network_latest_block: u64) -> Duration {
         if self.is_synced(current_block, network_latest_block) {
-            Duration::from_secs(self.scanner_cfg.synced_interval_secs)
+            Duration::from_secs(self.cfg().synced_interval_secs)
         } else {
-            Duration::from_millis(self.scanner_cfg.catching_up_interval_millis)
+            Duration::from_millis(self.cfg().catching_up_interval_millis)
         }
     }
 
@@ -113,13 +128,20 @@ impl EvmScanner {
         count: usize,
     ) -> Result<Vec<BlockData>> {
         let mut handles = Vec::new();
-        let timeout_secs = self.scanner_cfg.timeout_secs;
+        let timeout_secs = self.cfg().timeout_secs;
+        let semaphore = self.context.rpc_semaphore.clone();
 
         for i in 0..count {
             let block_number = start_block + i as u64;
             let client = self.client.clone();
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| anyhow::anyhow!("RPC concurrency semaphore closed"))?;
 
             let handle = tokio::spawn(async move {
+                let _permit = permit;
                 timeout(
                     Duration::from_secs(timeout_secs),
                     client.fetch_block_data_by_number(block_number),
@@ -141,17 +163,24 @@ impl EvmScanner {
                     if block_data.hash.is_empty() {
                         error!("Empty block hash for block {}", block_number);
                         failed_count += 1;
+                        self.metrics()
+                            .record_block_fetch_failure(BlockFetchFailureReason::Empty);
                     } else {
+                        self.metrics().record_block_fetch_success();
                         results.push(block_data);
                     }
                 }
                 Ok(Err(e)) => {
                     error!("Failed to fetch block {}: {}", block_number, e);
                     failed_count += 1;
+                    self.metrics()
+                        .record_block_fetch_failure(BlockFetchFailureReason::Rpc);
                 }
                 Err(e) => {
                     error!("Timeout fetching block {}: {}", block_number, e);
                     failed_count += 1;
+                    self.metrics()
+                        .record_block_fetch_failure(BlockFetchFailureReason::Timeout);
                 }
             }
         }
@@ -182,37 +211,50 @@ impl EvmScanner {
         let mut cleanup_result = None;
 
         // Check if we need cleanup based on data span
-        let progress = self.storage_manager.progress.get()?;
+        let progress = self.storage_manager().progress.get()?;
         if let (Some(min_block), Some(retention_blocks)) =
-            (progress.min_block, self.scanner_cfg.retention_blocks)
-            && progress.current_block - min_block - retention_blocks
-                >= self.scanner_cfg.cleanup_interval_blocks
+            (progress.min_block, self.cfg().retention_blocks)
         {
-            let get_cleanup_result = self.cleaner.get_cleanup_keys()?;
-            if !get_cleanup_result.is_empty() {
-                let total_keys = get_cleanup_result.total_keys();
-                cleanup_keys.extend(get_cleanup_result.keys_to_delete.clone());
-                info!("🧹 Cleanup: {} keys to delete", total_keys);
-                cleanup_result = Some(get_cleanup_result);
+            let span_distance = progress
+                .current_block
+                .saturating_sub(min_block)
+                .saturating_sub(retention_blocks);
+
+            if span_distance >= self.cfg().cleanup_interval_blocks {
+                let get_cleanup_result = self.cleaner.get_cleanup_keys()?;
+                if !get_cleanup_result.is_empty() {
+                    let total_keys = get_cleanup_result.total_keys();
+                    cleanup_keys.extend(get_cleanup_result.keys_to_delete.clone());
+                    info!("🧹 Cleanup: {} keys to delete", total_keys);
+                    cleanup_result = Some(get_cleanup_result);
+                }
             }
         }
 
-        // Use StorageManager to batch save blocks with indexes
-        self.storage_manager
-            .batch_save_blocks(blocks.clone(), cleanup_keys)?;
+        let batch_size = blocks.len();
+        let log_summary = blocks
+            .first()
+            .zip(blocks.last())
+            .map(|(first, last)| (first.hash.clone(), last.hash.clone()));
 
-        // Log detailed block information for debugging
-        if !blocks.is_empty() {
-            let first_block = blocks[0].hash.clone();
-            let last_block = blocks[blocks.len() - 1].hash.clone();
-            if blocks.len() == 1 {
-                debug!("✅ Batch saved 1 block (hash: {})", first_block);
+        let storage_manager = self.context.storage_manager.clone();
+        let cleanup_key_count = cleanup_keys.len();
+        let storage_start = Instant::now();
+        task::spawn_blocking(move || storage_manager.batch_save_blocks(blocks, cleanup_keys))
+            .await
+            .context("Blocking storage task failed")??;
+
+        let storage_duration = storage_start.elapsed();
+        self.metrics()
+            .record_storage_batch(storage_duration, batch_size, cleanup_key_count);
+
+        if let Some((first_hash, last_hash)) = log_summary {
+            if batch_size == 1 {
+                debug!("✅ Batch saved 1 block (hash: {})", first_hash);
             } else {
                 debug!(
                     "✅ Batch saved {} blocks (first: {}, last: {})",
-                    blocks.len(),
-                    first_block,
-                    last_block
+                    batch_size, first_hash, last_hash
                 );
             }
         }
@@ -221,7 +263,7 @@ impl EvmScanner {
 
     /// Scan next block(s) based on current state
     async fn scan_next_blocks(&self) -> Result<ScannerProgress> {
-        let mut progress = self.storage_manager.progress.get()?;
+        let mut progress = self.storage_manager().progress.get()?;
         let (target_block, network_latest_block) = self.get_target_block().await?;
 
         // Update network info
@@ -242,7 +284,7 @@ impl EvmScanner {
                 // Catching up: scan multiple blocks concurrently based on status
                 if concurrency > 1 {
                     let max_concurrent = std::cmp::min(blocks_to_scan, concurrency);
-                    let max_batch = self.scanner_cfg.batch_save_size;
+                    let max_batch = self.cfg().batch_save_size;
                     std::cmp::min(max_concurrent, max_batch)
                 } else {
                     1
@@ -258,7 +300,7 @@ impl EvmScanner {
             let blocks = self.scan_blocks_concurrent(start_block, scan_count).await?;
 
             // Verify batch continuity if enabled
-            if self.scanner_cfg.reorg_check_enabled {
+            if self.cfg().reorg_check_enabled {
                 let verification_result =
                     self.checker.verify_batch_continuity(&blocks, start_block)?;
 
@@ -274,7 +316,7 @@ impl EvmScanner {
                         // Handle reorg detection
                         self.handle_reorg_detection(reorg_block, suggested_rollback_depth)
                             .await?;
-                        return self.storage_manager.progress.get();
+                        return self.storage_manager().progress.get();
                     }
                     BatchVerificationResult::ContinuityBroken {
                         broken_block,
@@ -284,7 +326,7 @@ impl EvmScanner {
                         self.handle_continuity_break(broken_block, error_type)
                             .await?;
                         self.reset_success_count()?;
-                        return self.storage_manager.progress.get();
+                        return self.storage_manager().progress.get();
                     }
                     BatchVerificationResult::ValidationError {
                         message,
@@ -293,17 +335,22 @@ impl EvmScanner {
                         // Handle validation error - reset success count
                         self.handle_validation_error(message, block_number).await?;
                         self.reset_success_count()?;
-                        return self.storage_manager.progress.get();
+                        return self.storage_manager().progress.get();
                     }
                 }
             }
 
             // Save all blocks first
+            let last_block_number = blocks.last().map(|block| block.block_number);
             let cleanup_result = self.batch_save_blocks(blocks).await?;
 
             // Update progress only after successful save
             let previous_block = progress.current_block;
-            progress.current_block += scan_count as u64;
+            if let Some(last_block_number) = last_block_number {
+                progress.current_block = last_block_number;
+            } else {
+                progress.current_block += scan_count as u64;
+            }
             progress.consecutive_success_count += 1;
 
             // Update min_block if cleanup was performed
@@ -334,7 +381,10 @@ impl EvmScanner {
             };
 
             progress.updated_at = Utc::now();
-            self.storage_manager.progress.update(progress.clone())?;
+            self.storage_manager().progress.update(progress.clone())?;
+
+            self.metrics()
+                .record_blocks_processed(scan_count as u64, progress.current_block);
 
             // Log detailed block information
             let block_range = if scan_count == 1 {
@@ -351,8 +401,10 @@ impl EvmScanner {
             // Already caught up
             progress.status = ScannerStatus::Idle;
             progress.updated_at = Utc::now();
-            self.storage_manager.progress.update(progress.clone())?;
+            self.storage_manager().progress.update(progress.clone())?;
             info!("🔄 Already caught up - Status: {:?}", progress.status);
+            self.metrics()
+                .record_blocks_processed(0, progress.current_block);
         }
 
         Ok(progress)
@@ -361,7 +413,7 @@ impl EvmScanner {
     /// Print final scanner status
     fn print_final_status(&self) -> Result<()> {
         info!("📊 Final scanner status:");
-        let final_progress = self.storage_manager.progress.get()?;
+        let final_progress = self.storage_manager().progress.get()?;
         info!("  └─ Chain: {}", final_progress.chain);
         info!("  └─ Current block: {}", final_progress.current_block);
         info!("  └─ Target block: {}", final_progress.target_block);
@@ -394,6 +446,7 @@ impl EvmScanner {
 
                             // Log sync status
                             let gap = network_latest.saturating_sub(progress.current_block);
+                            self.metrics().record_sync_gap(gap);
                             if self.is_synced(progress.current_block, network_latest) {
                                 debug!("⏱️  Synced with network (gap: {}), waiting {:?}", gap, interval);
                             } else {
@@ -405,7 +458,7 @@ impl EvmScanner {
                         Err(e) => {
                             error!("❌ Scan error: {}", e);
                             // Use configured interval on error
-                            tokio::time::sleep(Duration::from_secs(self.scanner_cfg.error_interval_secs)).await;
+                            tokio::time::sleep(Duration::from_secs(self.cfg().error_interval_secs)).await;
                         }
                     }
                 }
@@ -475,7 +528,7 @@ impl EvmScanner {
 
     /// Get scan concurrency based on current status
     fn get_scan_concurrency(&self) -> Result<usize> {
-        let progress = self.storage_manager.progress.get()?;
+        let progress = self.storage_manager().progress.get()?;
 
         match progress.status {
             ScannerStatus::ReorgDetected => {
@@ -489,7 +542,7 @@ impl EvmScanner {
             }
             _ => {
                 // Normal mode: use configured concurrency
-                Ok(self.scanner_cfg.concurrency)
+                Ok(self.cfg().concurrency)
             }
         }
     }
@@ -497,7 +550,7 @@ impl EvmScanner {
     /// Check if service is running
     #[allow(dead_code)]
     fn is_service_running(&self) -> Result<bool> {
-        let progress = self.storage_manager.progress.get()?;
+        let progress = self.storage_manager().progress.get()?;
 
         match progress.status {
             ScannerStatus::Error => Ok(false),
@@ -507,10 +560,10 @@ impl EvmScanner {
 
     /// Reset consecutive success count
     fn reset_success_count(&self) -> Result<()> {
-        let mut progress = self.storage_manager.progress.get()?;
+        let mut progress = self.storage_manager().progress.get()?;
         progress.consecutive_success_count = 0;
         progress.updated_at = Utc::now();
-        self.storage_manager.progress.update(progress)?;
+        self.storage_manager().progress.update(progress)?;
         Ok(())
     }
 }

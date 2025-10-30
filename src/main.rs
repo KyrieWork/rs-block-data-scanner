@@ -2,16 +2,22 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use rs_block_data_scanner::{
     chains::evm::{
-        checker::EvmChecker, cleaner::EvmCleaner, client::EvmClient, scanner::EvmScanner,
+        checker::EvmChecker, cleaner::EvmCleaner, client::EvmClient, context::EvmScannerContext,
+        scanner::EvmScanner,
     },
     cli::Cli,
     config::AppConfig,
     storage::{manager::ScannerStorageManager, rocksdb::RocksDBStorage, traits::KVStorage},
-    utils::{format::format_size_bytes, logger::init_logger},
+    utils::{
+        format::format_size_bytes,
+        logger::init_logger,
+        metrics::{NoopScannerMetrics, PrometheusScannerMetrics, ScannerMetrics},
+    },
 };
-use tokio::sync::broadcast;
+use tokio::sync::{Semaphore, broadcast};
 use tracing::{error, info, warn};
 
 #[tokio::main]
@@ -33,6 +39,23 @@ async fn main() -> Result<()> {
         &log_path,
         &cfg.logging.timezone,
     );
+
+    if cfg.metrics.enable {
+        let metrics_port = cfg.metrics.prometheus_exporter_port;
+        PrometheusBuilder::new()
+            .with_http_listener(([0, 0, 0, 0], metrics_port))
+            .install()
+            .with_context(|| {
+                format!(
+                    "Failed to start Prometheus exporter on 0.0.0.0:{}",
+                    metrics_port
+                )
+            })?;
+        info!(
+            port = metrics_port,
+            "📈 Prometheus metrics exporter listening"
+        );
+    }
 
     info!("✅ Configuration load successful");
     info!(chain = %cfg.scanner.chain_type, "Chain type configuration");
@@ -79,11 +102,13 @@ async fn main() -> Result<()> {
         "evm" => {
             info!("🚀 Starting EVM blockchain scanner...");
 
+            let scanner_cfg = Arc::new(cfg.scanner.clone());
+
             // Initialize storage with chain-specific path
             let storage_path = format!(
                 "{}/{}",
                 cfg.storage.path.trim_end_matches('/'),
-                cfg.scanner.chain_name
+                scanner_cfg.chain_name
             );
 
             // Create directory if not exists
@@ -113,52 +138,62 @@ async fn main() -> Result<()> {
             info!("✅ Storage initialized");
             info!("  └─ Path: {}", storage_path);
             info!("  └─ Base: {}", cfg.storage.path);
-            info!("  └─ Chain: {}", cfg.scanner.chain_name);
+            info!("  └─ Chain: {}", scanner_cfg.chain_name);
 
             // Create storage manager
             let storage_manager = Arc::new(ScannerStorageManager::new(
                 storage.clone(),
-                cfg.scanner.chain_name.clone(),
+                scanner_cfg.chain_name.clone(),
             ));
+
+            let metrics_handle: Arc<dyn ScannerMetrics> = if cfg.metrics.enable {
+                Arc::new(PrometheusScannerMetrics::new(
+                    scanner_cfg.chain_name.clone(),
+                ))
+            } else {
+                Arc::new(NoopScannerMetrics::new())
+            };
+            let rpc_semaphore = Arc::new(Semaphore::new(scanner_cfg.concurrency));
+
+            let scanner_context = EvmScannerContext::new(
+                Arc::clone(&scanner_cfg),
+                Arc::clone(&storage_manager),
+                metrics_handle,
+                rpc_semaphore,
+            );
 
             // Create EVM client
-            let client = Arc::new(EvmClient::new(&cfg.rpc.url)?);
+            let client = Arc::new(EvmClient::new(
+                cfg.rpc.url.clone(),
+                cfg.rpc.backups.clone().unwrap_or_default(),
+            )?);
 
             // Create EVM checker
-            let checker = Arc::new(EvmChecker::new(
-                cfg.scanner.clone(),
-                storage_manager.progress.clone(),
-                storage_manager.block_index.clone(),
-                storage_manager.storage.clone(),
-            ));
+            let checker = Arc::new(EvmChecker::new(scanner_context.clone()));
 
             // Create EVM cleaner
-            let cleaner = Arc::new(EvmCleaner::new(
-                cfg.scanner.clone(),
-                storage_manager.storage.clone(),
-            ));
+            let cleaner = Arc::new(EvmCleaner::new(scanner_context.clone()));
 
             // Create EVM scanner
             let scanner = EvmScanner::new(
-                cfg.scanner.clone(),
+                scanner_context,
                 client,
-                storage_manager,
-                checker,
-                cleaner,
+                Arc::clone(&checker),
+                Arc::clone(&cleaner),
             );
 
             // Initialize scanner
             scanner.init().await?;
 
             // Cleanup is integrated into scanner, no separate task needed
-            if cfg.scanner.cleanup_enabled {
+            if scanner_cfg.cleanup_enabled {
                 info!("🧹 Cleanup enabled - integrated into scanner");
-                info!("  └─ Retention blocks: {:?}", cfg.scanner.retention_blocks);
+                info!("  └─ Retention blocks: {:?}", scanner_cfg.retention_blocks);
                 info!(
                     "  └─ Cleanup interval: {} blocks",
-                    cfg.scanner.cleanup_interval_blocks
+                    scanner_cfg.cleanup_interval_blocks
                 );
-                info!("  └─ Batch size: {}", cfg.scanner.cleanup_batch_size);
+                info!("  └─ Batch size: {}", scanner_cfg.cleanup_batch_size);
             }
 
             // Start scanning with shutdown support
