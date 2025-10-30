@@ -1,0 +1,55 @@
+use crate::storage::rocksdb::RocksDBStorage;
+use crate::storage::traits::KVStorage;
+use anyhow::{Context, Result};
+use std::sync::Arc;
+
+pub struct ApiStorage {
+    db: Arc<RocksDBStorage>,
+}
+
+impl ApiStorage {
+    pub fn open_readonly(path: &str) -> Result<Self> {
+        let db = RocksDBStorage::open_read_only(path)
+            .with_context(|| format!("Failed to open RocksDB at {path}"))?;
+        Ok(Self { db: Arc::new(db) })
+    }
+
+    pub fn read_raw(&self, key: &str) -> Result<Option<String>> {
+        self.db.read(key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{rocksdb::RocksDBStorage, traits::KVStorage};
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn prepare_db(path: &Path) -> Result<()> {
+        let storage = RocksDBStorage::new(path.to_str().unwrap())?;
+        storage.init()?;
+        storage.write("test:key", "value")?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_existing_key_returns_value() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        prepare_db(temp_dir.path())?;
+        let api_storage = ApiStorage::open_readonly(temp_dir.path().to_str().unwrap())?;
+        let value = api_storage.read_raw("test:key")?;
+        assert_eq!(value.as_deref(), Some("value"));
+        Ok(())
+    }
+
+    #[test]
+    fn read_missing_key_returns_none() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        prepare_db(temp_dir.path())?;
+        let api_storage = ApiStorage::open_readonly(temp_dir.path().to_str().unwrap())?;
+        let value = api_storage.read_raw("missing")?;
+        assert!(value.is_none());
+        Ok(())
+    }
+}

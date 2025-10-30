@@ -23,6 +23,20 @@ pub struct RocksDBStorage {
 
 impl RocksDBStorage {
     pub fn new(path: &str) -> Result<Self> {
+        let opts = Self::default_options(true);
+        let db = DB::open(&opts, path)
+            .with_context(|| format!("Failed to open RocksDB at path: {}", path))?;
+        Ok(Self { db: Arc::new(db) })
+    }
+
+    pub fn open_read_only(path: &str) -> Result<Self> {
+        let opts = Self::default_options(false);
+        let db = DB::open_for_read_only(&opts, path, true)
+            .with_context(|| format!("Failed to open RocksDB at path: {}", path))?;
+        Ok(Self { db: Arc::new(db) })
+    }
+
+    fn default_options(create_if_missing: bool) -> Options {
         let mut opts = Options::default();
 
         // ============================
@@ -31,7 +45,7 @@ impl RocksDBStorage {
         // ============================
 
         // 1. Write buffer configuration - balanced for large values
-        opts.create_if_missing(true);
+        opts.create_if_missing(create_if_missing);
         opts.set_write_buffer_size(1024 * 1024 * 1024); // 1GB (balanced for large blocks)
         opts.set_max_write_buffer_number(4); // 4 buffers (controlled memory usage)
         opts.set_min_write_buffer_number_to_merge(2); // merge 2 buffers before flush
@@ -72,9 +86,7 @@ impl RocksDBStorage {
         opts.set_delete_obsolete_files_period_micros(21600000000); // 6 hours cleanup interval
         opts.set_max_sequential_skip_in_iterations(8); // optimize for large sequential reads
 
-        let db = DB::open(&opts, path)
-            .with_context(|| format!("Failed to open RocksDB at path: {}", path))?;
-        Ok(Self { db: Arc::new(db) })
+        opts
     }
 
     /// Delete multiple keys in a batch (atomic operation for better performance)
