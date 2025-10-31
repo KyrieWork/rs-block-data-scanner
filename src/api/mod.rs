@@ -3,7 +3,7 @@ pub mod storage;
 
 use crate::config::AppConfig;
 use crate::utils::logger::init_logger;
-use handlers::{ApiHttpResponse, get_key_value};
+use handlers::{ApiHttpResponse, get_key_value, get_progress};
 use storage::ApiStorage;
 
 pub fn handle_request(path: &str, storage: &ApiStorage) -> ApiHttpResponse {
@@ -16,6 +16,10 @@ pub fn handle_request(path: &str, storage: &ApiStorage) -> ApiHttpResponse {
             };
         }
         return get_key_value(key, storage);
+    }
+
+    if path == "/progress" {
+        return get_progress(storage);
     }
 
     ApiHttpResponse {
@@ -47,8 +51,11 @@ mod tests {
         storage.init().unwrap();
         storage.write("alpha", "beta").unwrap();
         storage.write("json", "{\"hello\":\"world\"}").unwrap();
+        storage
+            .write("test:progress", "{\"chain\":\"test\",\"current_block\":1}")
+            .unwrap();
         drop(storage);
-        ApiStorage::open_readonly(path.to_str().unwrap()).unwrap()
+        ApiStorage::open_readonly(path.to_str().unwrap(), "test").unwrap()
     }
 
     #[test]
@@ -77,5 +84,15 @@ mod tests {
         assert_eq!(response.status, 200);
         let json: serde_json::Value = serde_json::from_str(&response.body).unwrap();
         assert_eq!(json["value"]["hello"], "world");
+    }
+
+    #[test]
+    fn handle_request_returns_progress() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = prepare_storage(&temp_dir);
+        let response = handle_request("/progress", &storage);
+        assert_eq!(response.status, 200);
+        let json: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(json["chain"], "test");
     }
 }

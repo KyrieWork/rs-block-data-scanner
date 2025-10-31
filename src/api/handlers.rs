@@ -67,6 +67,50 @@ pub fn get_key_value(key: &str, storage: &ApiStorage) -> ApiHttpResponse {
     }
 }
 
+pub fn get_progress(storage: &ApiStorage) -> ApiHttpResponse {
+    match storage.read_progress() {
+        Ok(Some(value)) => {
+            let parsed_value =
+                serde_json::from_str::<Value>(&value).unwrap_or(Value::String(value));
+            match serde_json::to_string(&parsed_value) {
+                Ok(body) => ApiHttpResponse {
+                    status: StatusCode::OK.as_u16(),
+                    body,
+                    content_type: "application/json",
+                },
+                Err(err) => ApiHttpResponse {
+                    status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    body: format!("{{\"error\":\"failed to serialize progress: {}\"}}", err),
+                    content_type: "application/json",
+                },
+            }
+        }
+        Ok(None) => {
+            let body = serde_json::json!({
+                "error": format!("Progress not found for {}", storage.chain())
+            })
+            .to_string();
+            ApiHttpResponse {
+                status: StatusCode::NOT_FOUND.as_u16(),
+                body,
+                content_type: "application/json",
+            }
+        }
+        Err(err) => {
+            let error = ErrorResponse {
+                error: format!("Failed to read progress: {err}"),
+            };
+            let body = serde_json::to_string(&error)
+                .unwrap_or_else(|_| "{\"error\":\"Internal server error\"}".to_string());
+            ApiHttpResponse {
+                status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                body,
+                content_type: "application/json",
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,8 +124,11 @@ mod tests {
         storage.init().unwrap();
         storage.write("existing", "value").unwrap();
         storage.write("json", "{\"foo\":\"bar\"}").unwrap();
+        storage
+            .write("test:progress", "{\"chain\":\"test\",\"current_block\":42}")
+            .unwrap();
         drop(storage);
-        ApiStorage::open_readonly(path.to_str().unwrap()).unwrap()
+        ApiStorage::open_readonly(path.to_str().unwrap(), "test").unwrap()
     }
 
     #[test]
@@ -111,5 +158,16 @@ mod tests {
         assert_eq!(response.status, StatusCode::OK.as_u16());
         let json: serde_json::Value = serde_json::from_str(&response.body).unwrap();
         assert_eq!(json["value"]["foo"], "bar");
+    }
+
+    #[test]
+    fn handler_returns_progress_when_available() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = prepare_storage(&temp_dir);
+        let response = get_progress(&storage);
+        assert_eq!(response.status, StatusCode::OK.as_u16());
+        let json: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(json["chain"], "test");
+        assert_eq!(json["current_block"], 42);
     }
 }
