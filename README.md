@@ -69,24 +69,24 @@ rs-block-data-scanner/
 
 ## Technology Stack
 
-| Module | Library | Description |
-|--------|---------|-------------|
-| **Async Runtime** | `tokio` | Task scheduling and concurrent block fetching |
-| **RPC Client** | `alloy` | Interaction with EVM nodes |
-| **Storage Engine** | `rocksdb` | High-performance key-value storage for raw JSON data |
-| **Logging System** | `tracing` + `tracing-subscriber` | Structured logging and span-based tracing |
-| **Config Management** | `config` | Reading RPC URL, concurrency, start block, etc. from config.yaml |
-| **Metrics Monitoring** | `metrics` + `prometheus` | Capturing fetch rate, error rate, latency, etc. |
-| **Error Handling** | `anyhow` | Unified error stack |
-| **Serialization** | `serde` + `serde_json` | JSON data serialization and deserialization |
-| **Command Line** | `clap` | Command-line argument parsing |
-| **Time Processing** | `chrono` | Timestamp handling |
+| Module                 | Library                          | Description                                                      |
+| ---------------------- | -------------------------------- | ---------------------------------------------------------------- |
+| **Async Runtime**      | `tokio`                          | Task scheduling and concurrent block fetching                    |
+| **RPC Client**         | `alloy`                          | Interaction with EVM nodes                                       |
+| **Storage Engine**     | `rocksdb`                        | High-performance key-value storage for raw JSON data             |
+| **Logging System**     | `tracing` + `tracing-subscriber` | Structured logging and span-based tracing                        |
+| **Config Management**  | `config`                         | Reading RPC URL, concurrency, start block, etc. from config.yaml |
+| **Metrics Monitoring** | `metrics` + `prometheus`         | Capturing fetch rate, error rate, latency, etc.                  |
+| **Error Handling**     | `anyhow`                         | Unified error stack                                              |
+| **Serialization**      | `serde` + `serde_json`           | JSON data serialization and deserialization                      |
+| **Command Line**       | `clap`                           | Command-line argument parsing                                    |
+| **Time Processing**    | `chrono`                         | Timestamp handling                                               |
 
 ## Quick Start
 
 ### 1. Prerequisites
 
-- Rust 1.75+ (for edition 2024 support) 
+- Rust 1.75+ (for edition 2024 support)
 - Sufficient disk space (recommended at least 100GB for storing block data)
 - Stable network connection and RPC node access
 
@@ -161,6 +161,7 @@ The project uses RocksDB as the storage engine, optimized for large block data:
 - **Data Cleanup**: Supports automatic cleanup of expired data
 
 Stored data includes:
+
 - Block data (complete block information)
 - Transaction receipts
 - Transaction trace logs
@@ -215,9 +216,10 @@ make verify
 ## Contributing
 
 Issues and Pull Requests are welcome to improve the project.
+
 ### API Service
 
-The API binary (`api_main`) shares the same configuration file and reads data from RocksDB in read-only mode. Scanner 与 API 可同时运行。
+The API binary (`api_main`) shares the same configuration file as the scanner and reads RocksDB in read-only mode, so both services can run simultaneously.
 
 ```bash
 # Start API service
@@ -228,4 +230,19 @@ The API binary (`api_main`) shares the same configuration file and reads data fr
 
 # Query kv endpoint
 curl "http://localhost:9001/kv/bsc:block_data:<block_hash>"
+
+# Query progress endpoint
+curl "http://localhost:9001/progress"
 ```
+
+Available endpoints:
+
+- `GET /kv/{key}`: returns `{ "key": string, "value": any }`. If the stored value is valid JSON (e.g. block data, receipts, traces) it is parsed and returned as JSON; otherwise the raw string is returned.
+- `GET /progress`: returns the latest scanner progress JSON for the configured `scanner.chain_name`, useful to verify that the API can read the correct RocksDB data.
+
+Typical keys:
+
+- `bsc:block_data:<block_hash>` – block JSON.
+- `bsc:block_receipts:<block_hash>` – receipts.
+- `bsc:block_debug_trace:<block_hash>` – debug trace result.
+- `bsc:progress` – scanner progress (used by the `/progress` endpoint).
