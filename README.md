@@ -23,48 +23,33 @@ RS Block Data Scanner is a professional blockchain data collection tool designed
 ```
 rs-block-data-scanner/
 ├── Cargo.toml                      # Project configuration and dependencies
-├── config_example.yaml             # Configuration file example
-├── config.bsc.yaml                 # BSC chain configuration
-├── config.bsc.prod.yaml            # BSC production configuration
-├── start.sh                        # Startup script
-├── stop.sh                         # Stop script
-├── rebuild.sh                      # Rebuild script
-├── Makefile                        # Build tools
-├── data/                           # Data storage directory
-│   └── rocksdb/                    # RocksDB database files
-├── logs/                           # Log files directory
-└── src/
-    ├── main.rs                     # Main program entry point
-    ├── cli.rs                      # Command-line argument parsing
-    ├── config.rs                   # Configuration management
-    ├── lib.rs                      # Library entry point
-    │
-    ├── core/                       # Core modules
-    │   ├── mod.rs
-    │   ├── types.rs                # Common data structures
-    │   └── table.rs                # Data table structures
-    │
-    ├── chains/                     # Blockchain support modules
-    │   ├── mod.rs
-    │   └── evm/                    # EVM-compatible chain support
-    │       ├── mod.rs
-    │       ├── client.rs           # RPC client
-    │       ├── scanner.rs          # EVM scanner implementation (metrics + concurrency control)
-    │       ├── checker.rs          # Data validator
-    │       └── cleaner.rs          # EVM data cleaner
-    │
-    ├── storage/                    # Storage modules
-    │   ├── mod.rs
-    │   ├── rocksdb.rs              # RocksDB storage implementation
-    │   ├── manager.rs              # Storage manager
-    │   ├── schema.rs               # Data schema definitions
-    │   └── traits.rs               # Storage trait definitions
-    │
-    └── utils/                      # Utility modules
-        ├── mod.rs
-        ├── logger.rs               # Logging utilities
-        ├── metrics.rs              # Metrics abstraction (Prometheus / no-op)
-        └── format.rs               # Formatting utilities
+├── Makefile                        # Build and verification commands
+├── rebuild.sh                      # Convenience rebuild script
+├── config_example.yaml             # Example configuration template
+├── config.yaml                     # Default (editable) configuration used by scripts
+├── config.bsc.prod.yaml            # Production-oriented configuration example
+├── scripts/                        # Deployment helpers
+│   ├── start_scanner.sh            # Start the scanner service (background)
+│   ├── stop_scanner.sh             # Stop the scanner service
+│   ├── start_api.sh                # Start the read-only API service
+│   ├── stop_api.sh                 # Stop the API service
+│   └── help.sh                     # Quick reference for script usage
+├── data/                           # Runtime data (RocksDB, etc.)
+│   └── rocksdb/
+├── logs/                           # Runtime logs (scanner/api)
+├── src/
+│   ├── bin/
+│   │   └── api_main.rs             # API service entrypoint
+│   ├── api/                        # API modules (request handlers and storage adapters)
+│   ├── chains/                     # Blockchain-specific logic (EVM, etc.)
+│   ├── core/                       # Shared data structures
+│   ├── storage/                    # RocksDB abstractions and manager
+│   ├── utils/                      # Logger, metrics, helpers
+│   ├── cli.rs                      # Command-line parsing
+│   ├── config.rs                   # Config loading/validation
+│   ├── main.rs                     # Scanner entrypoint
+│   └── lib.rs                      # Library exports
+└── tests/                          # Integration tests (e.g., reorg scenarios)
 ```
 
 ## Technology Stack
@@ -87,7 +72,7 @@ rs-block-data-scanner/
 ### 1. Prerequisites
 
 - Rust 1.75+ (for edition 2024 support)
-- Sufficient disk space (recommended at least 100GB for storing block data)
+- Sufficient disk space (Recommend at least 30GB for storing block data, depending on your configuration)
 - Stable network connection and RPC node access
 
 ### 2. Build the Project
@@ -106,13 +91,13 @@ cargo build --release
 
 ### 3. Configuration
 
-Copy the configuration file and modify the relevant settings:
+The scanner expects a `config.yaml` file at the repository root. You can use the provided template as a starting point:
 
 ```bash
 cp config_example.yaml config.yaml
 ```
 
-Key configuration groups:
+Update the file before running the service (especially `rpc.url`, `storage.path`, logging settings, and cleanup policy). Key configuration groups:
 
 - `scanner.*`: Chain metadata, concurrency, clean-up behaviour and reorg thresholds
 - `rpc.url`: Primary RPC endpoint (required)
@@ -128,7 +113,7 @@ Key configuration groups:
 # Run directly
 ./target/release/rs-block-data-scanner --config config.yaml
 
-# Or use the startup script
+# Or start via script (runs the release binary in the background)
 ./scripts/start_scanner.sh
 ```
 
@@ -137,8 +122,39 @@ Key configuration groups:
 - View logs: `tail -f logs/<chain_name>.scanner.log`
 - Stop service: `./scripts/stop_scanner.sh`
 - Monitor metrics: Visit `http://localhost:9100/metrics` (if `metrics.enable = true`)
+- Optional: start the read-only API service with `./scripts/start_api.sh`
 
-## Configuration
+### API Service
+
+The API binary (`api_main`) shares the same configuration file as the scanner and reads RocksDB in read-only mode, so both services can run simultaneously.
+
+```bash
+# Start API service
+./scripts/start_api.sh
+
+# Stop API service
+./scripts/stop_api.sh
+
+# Query kv endpoint
+curl "http://localhost:9001/kv/bsc:block_data:<block_hash>"
+
+# Query progress endpoint
+curl "http://localhost:9001/progress"
+```
+
+Available endpoints:
+
+- `GET /kv/{key}` returns `{ "key": string, "value": any }`. If the stored value is valid JSON (e.g. block data, receipts, traces) it is parsed and returned as JSON; otherwise the raw string is returned.
+- `GET /progress` returns the latest scanner progress JSON for the configured `scanner.chain_name`, which is also a convenient health check of the API ↔ RocksDB connection.
+
+Common keys:
+
+- `bsc:block_data:<block_hash>` – block payload.
+- `bsc:block_receipts:<block_hash>` – receipts payload.
+- `bsc:block_debug_trace:<block_hash>` – debug trace payload.
+- `bsc:progress` – scanner progress record (consumed by `/progress`).
+
+## Configuration Details
 
 The project supports rich configuration options, including:
 
@@ -149,7 +165,7 @@ The project supports rich configuration options, including:
 - **Logging Configuration**: Level, file output, timezone settings
 - **Monitoring Configuration**: Enable switch, Prometheus export port
 
-For detailed configuration instructions, please refer to the `config_example.yaml` file.
+See `config_example.yaml` for inline documentation of all available fields.
 
 ## Data Storage
 
@@ -216,33 +232,3 @@ make verify
 ## Contributing
 
 Issues and Pull Requests are welcome to improve the project.
-
-### API Service
-
-The API binary (`api_main`) shares the same configuration file as the scanner and reads RocksDB in read-only mode, so both services can run simultaneously.
-
-```bash
-# Start API service
-./scripts/start_api.sh
-
-# Stop API service
-./scripts/stop_api.sh
-
-# Query kv endpoint
-curl "http://localhost:9001/kv/bsc:block_data:<block_hash>"
-
-# Query progress endpoint
-curl "http://localhost:9001/progress"
-```
-
-Available endpoints:
-
-- `GET /kv/{key}`: returns `{ "key": string, "value": any }`. If the stored value is valid JSON (e.g. block data, receipts, traces) it is parsed and returned as JSON; otherwise the raw string is returned.
-- `GET /progress`: returns the latest scanner progress JSON for the configured `scanner.chain_name`, useful to verify that the API can read the correct RocksDB data.
-
-Typical keys:
-
-- `bsc:block_data:<block_hash>` – block JSON.
-- `bsc:block_receipts:<block_hash>` – receipts.
-- `bsc:block_debug_trace:<block_hash>` – debug trace result.
-- `bsc:progress` – scanner progress (used by the `/progress` endpoint).
